@@ -6,6 +6,7 @@ include_guard(GLOBAL)
 set(BOOST_VERSION "1.92.0")
 set(BOOST_RELEASE_VERSION "1.92.0")
 set(BOOST_COMPONENTS
+        algorithm
         atomic
         asio
         beast
@@ -25,7 +26,6 @@ set(BOOST_COMPONENTS
 # Additional components used by the Windows sources.
 if(WIN32)
     list(APPEND BOOST_COMPONENTS
-            algorithm
             preprocessor
             uuid
     )

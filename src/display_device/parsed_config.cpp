@@ -298,7 +298,6 @@ namespace display_device {
     }
 
     /**
-    /**
      * @brief Parse HDR option from the user configuration and the session information.
      * @param config User's video related configuration.
      * @param session Session information.

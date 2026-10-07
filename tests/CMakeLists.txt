@@ -59,6 +59,7 @@ add_executable(app_display_profile_unit_tests
         ${CMAKE_SOURCE_DIR}/tests/unit/test_app_display_profile.cpp)
 target_include_directories(app_display_profile_unit_tests PRIVATE "${CMAKE_SOURCE_DIR}")
 target_link_libraries(app_display_profile_unit_tests
+        Boost::algorithm
         Boost::property_tree
         nlohmann_json::nlohmann_json
         gtest_main)

@@ -339,6 +339,8 @@ jobs:
           npm ci
           npm run lint:webui
           npm run test:webui
+          npm run i18n:validate
+          npm run i18n:format:check
           New-Item -ItemType Directory -Force -Path build | Out-Null
           $env:SUNSHINE_SOURCE_ASSETS_DIR = "${{ github.workspace }}\src_assets"
           $env:SUNSHINE_ASSETS_DIR = "${{ github.workspace }}\build"
@@ -729,6 +731,21 @@ jobs:
             artifacts/SHA256SUMS.txt
             artifacts/checksums.json
           if-no-files-found: error
+
+      - name: Create annotated release tag
+        if: needs.setup_release.outputs.publish_release == 'true'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.setup_release.outputs.release_tag }}
+          RELEASE_COMMIT: ${{ needs.setup_release.outputs.release_commit }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          git check-ref-format "refs/tags/$RELEASE_TAG"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "$RELEASE_TAG" "$RELEASE_COMMIT" -m "Release $RELEASE_TAG"
+          git push origin "refs/tags/$RELEASE_TAG"
 
       - name: Create GitHub Release
         if: needs.setup_release.outputs.publish_release == 'true'

@@ -25,7 +25,7 @@ extern "C" {
 }
 
 struct AVPacket;
-namespace hdr_enhanced {
+namespace image_enhancement {
   struct backend_use_t;
 }
 
@@ -40,6 +40,8 @@ namespace video {
   struct hdr_pipeline_status_t {
     std::uint64_t id {};
     std::string hdr_mode { "sdr" };
+    std::string dv_profile;
+    std::string dv_state { "off" };
     std::string analysis_mode { "off" };
     bool analysis_active {};
     bool scene_metadata_active {};
@@ -50,6 +52,22 @@ namespace video {
     std::string synthetic_hdr_backend { "none" };
     std::string synthetic_hdr_state { "disabled" };
     std::string synthetic_hdr_failure_reason;
+    std::string nr_backend { "none" };
+    std::string nr_state { "disabled" };
+    std::string nr_failure_reason;
+    bool nr_toggle_supported {};
+    bool nr_requested_enabled {};
+    int nr_requested_scale_percent = 100;
+    int nr_scale_percent = 100;
+    float nr_requested_intensity = 1.0f, nr_intensity = 1.0f;
+    bool nr_requested_ui_correction = false, nr_ui_correction = false;
+    int nr_requested_motion_quality = 0, nr_motion_quality = 0;
+    int nr_requested_style = 0, nr_style = 0;
+    float nr_requested_skin_structure_strength = 0.0f, nr_skin_structure_strength = 0.0f;
+    bool nr_requested_auto_mask = false, nr_auto_mask = false;
+    std::uint64_t nr_request_revision = 0;
+    std::uint32_t nr_source_width {}, nr_source_height {};
+    std::string nr_settings_failure_reason;
   };
 
   std::uint64_t
@@ -64,6 +82,26 @@ namespace video {
   std::vector<hdr_pipeline_status_t>
   get_hdr_pipeline_statuses();
 
+  // Requests are consumed only by the owning conversion thread at a frame boundary.
+  struct nr_request_t {
+    bool enabled;
+    int scale_percent;
+    float intensity = 1.0f;
+    bool ui_correction = false;
+    int motion_quality = 0;
+    std::uint64_t revision = 0;
+    int style = 0;
+    float skin_structure_strength = 0.0f;
+    bool auto_mask = false;
+  };
+  int request_nr_enabled(std::uint64_t id, bool enabled, std::optional<int> scale_percent = std::nullopt,
+    std::optional<float> intensity = std::nullopt, std::optional<bool> ui_correction = std::nullopt,
+    std::optional<int> motion_quality = std::nullopt,
+    std::optional<int> style = std::nullopt, std::optional<float> skin_structure_strength = std::nullopt,
+    std::optional<bool> auto_mask = std::nullopt);
+  std::optional<nr_request_t> requested_nr_settings(std::uint64_t id);
+  bool rollback_nr_settings(std::uint64_t id, const nr_request_t &failed, const nr_request_t &previous);
+
   // 动态参数调节类型
   enum class dynamic_param_type_e : int {
     RESOLUTION,        // 分辨率 - 值：2个int (width, height)
@@ -77,7 +115,7 @@ namespace video {
     VBV_BUFFER_SIZE,   // VBV缓冲区大小 - 值：1个int
     // Wire value 9; keep this explicit because the enum ordinal is part of the
     // Sunshine dynamic-parameter control protocol.
-    CLIENT_SDR_WHITE_NITS = 9, // 客户端 SDR reference white - 值：1个float (nits)
+    CLIENT_SDR_WHITE_NITS = 9, // Reserved legacy wire ID; ignored, never reuse
     MAX_PARAM_TYPE
   };
 
@@ -163,7 +201,7 @@ namespace video {
     bool frame_pipeline_policy_resolved = false;
     platf::pre_encode_filter_e pre_encode_filter = platf::pre_encode_filter_e::none;
     platf::pre_encode_filter_config_t pre_encode_filter_config;
-    boost::shared_ptr<const hdr_enhanced::backend_use_t> hdr_backend;
+    boost::shared_ptr<const image_enhancement::backend_use_t> enhancement_backend;
 
     platf::frame_pipeline_policy_t
     effective_frame_pipeline_policy() const {
@@ -585,18 +623,6 @@ namespace video {
    */
   std::string
   active_encoder_name();
-
-  /**
-   * @brief Whether the selected encoder path can apply runtime SDR white updates.
-   */
-  bool
-  active_encoder_supports_dynamic_sdr_white();
-
-  /**
-   * @brief Validate a client SDR reference white value from the control stream.
-   */
-  bool
-  is_valid_client_sdr_white_nits(float nits);
 
   void
   capture(

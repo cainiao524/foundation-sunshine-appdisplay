@@ -90,6 +90,16 @@ endif ()
 add_test(NAME frame_contract_unit_tests COMMAND frame_contract_unit_tests)
 
 if (WIN32)
+    set(HDR_ENCODING_TEST_SOURCE
+            ${CMAKE_SOURCE_DIR}/tests/unit/platform/windows/test_hdr_encoding.cpp)
+    add_executable(hdr_encoding_unit_tests
+            ${HDR_ENCODING_TEST_SOURCE})
+    target_link_libraries(hdr_encoding_unit_tests PRIVATE d3d11 d3dcompiler dxgi gtest_main)
+    target_compile_definitions(hdr_encoding_unit_tests PRIVATE
+            SUNSHINE_SHADERS_DIR="${CMAKE_SOURCE_DIR}/src_assets/windows/assets/shaders/directx")
+    set_target_properties(hdr_encoding_unit_tests PROPERTIES CXX_STANDARD 23 LINK_SEARCH_START_STATIC 1)
+    add_test(NAME hdr_encoding_unit_tests COMMAND hdr_encoding_unit_tests)
+
     set(PRE_ENCODE_FILTER_TEST_SOURCE
             ${CMAKE_SOURCE_DIR}/tests/unit/platform/windows/test_pre_encode_filter.cpp)
     set(TRUEHDR_ADAPTER_LOADER_TEST_SOURCE
@@ -97,9 +107,12 @@ if (WIN32)
 
     add_executable(pre_encode_filter_unit_tests
             ${CMAKE_SOURCE_DIR}/src/platform/windows/pre_encode_filter.cpp
-            ${CMAKE_SOURCE_DIR}/src/platform/windows/hdr_backend_factory.cpp
-            ${CMAKE_SOURCE_DIR}/src/platform/windows/hdr_enhanced/nvidia_rtx_video/truehdr_filter.cpp
-            ${CMAKE_SOURCE_DIR}/src/platform/windows/hdr_enhanced/nvidia_rtx_video/adapter_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/platform/windows/image_enhancement/backend_factory.cpp
+            ${CMAKE_SOURCE_DIR}/src/platform/windows/image_enhancement/rtx_hdr/truehdr_filter.cpp
+            ${CMAKE_SOURCE_DIR}/src/platform/windows/image_enhancement/rtx_hdr/adapter_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/platform/windows/image_enhancement/dlss_nr/dlssnr_filter.cpp
+            ${CMAKE_SOURCE_DIR}/src/platform/windows/image_enhancement/dlss_nr/hdr_filter.cpp
+            ${CMAKE_SOURCE_DIR}/src/platform/windows/image_enhancement/dlss_nr/adapter_loader.cpp
             ${CMAKE_SOURCE_DIR}/tests/tools/pre_encode_filter_test_stubs.cpp
             ${PRE_ENCODE_FILTER_TEST_SOURCE})
     target_include_directories(pre_encode_filter_unit_tests PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -117,6 +130,20 @@ if (WIN32)
             CXX_STANDARD 23
             LINK_SEARCH_START_STATIC 1)
     add_test(NAME pre_encode_filter_unit_tests COMMAND pre_encode_filter_unit_tests)
+
+    if (SUNSHINE_DLSSNR_AVAILABLE)
+        # Hardware/runtime are supplied explicitly; do not add to ordinary CTest.
+        get_target_property(_nr_filter_sources pre_encode_filter_unit_tests SOURCES)
+        list(REMOVE_ITEM _nr_filter_sources "${PRE_ENCODE_FILTER_TEST_SOURCE}")
+        add_executable(dlssnr_pipeline_smoke ${_nr_filter_sources}
+                ${CMAKE_SOURCE_DIR}/tests/tools/dlssnr_pipeline_smoke.cpp)
+        target_include_directories(dlssnr_pipeline_smoke PRIVATE "${CMAKE_SOURCE_DIR}" "${DLSSNR_TRUST_INCLUDE}")
+        target_compile_definitions(dlssnr_pipeline_smoke PRIVATE SUNSHINE_DLSSNR_ADAPTER
+                SUNSHINE_SHADERS_DIR="${CMAKE_SOURCE_DIR}/src_assets/windows/assets/shaders/directx")
+        target_link_libraries(dlssnr_pipeline_smoke Boost::log Boost::thread d3d11 d3dcompiler dxgi bcrypt)
+        set_target_properties(dlssnr_pipeline_smoke PROPERTIES CXX_STANDARD 23 LINK_SEARCH_START_STATIC 1)
+        add_dependencies(dlssnr_pipeline_smoke sunshine_dlssnr_adapter)
+    endif ()
 
     add_library(fake_truehdr_adapter SHARED
             ${CMAKE_SOURCE_DIR}/tests/tools/fake_truehdr_adapter.cpp)
@@ -144,7 +171,7 @@ if (WIN32)
             PREFIX "")
 
     add_executable(truehdr_adapter_loader_unit_tests
-            ${CMAKE_SOURCE_DIR}/src/platform/windows/hdr_enhanced/nvidia_rtx_video/adapter_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/platform/windows/image_enhancement/rtx_hdr/adapter_loader.cpp
             ${TRUEHDR_ADAPTER_LOADER_TEST_SOURCE})
     target_include_directories(truehdr_adapter_loader_unit_tests PRIVATE "${CMAKE_SOURCE_DIR}")
     target_link_libraries(truehdr_adapter_loader_unit_tests gtest_main)
@@ -206,12 +233,14 @@ endif ()
 
 add_executable(loopback_usbip_bridge_unit_tests
         ${CMAKE_SOURCE_DIR}/src/remote_usb/loopback_usbip_bridge.cpp
+        ${CMAKE_SOURCE_DIR}/src/crypto.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_loopback_usbip_bridge.cpp)
 target_include_directories(loopback_usbip_bridge_unit_tests PRIVATE
         "${CMAKE_SOURCE_DIR}")
 target_link_libraries(loopback_usbip_bridge_unit_tests
         Boost::asio
         Boost::system
+        OpenSSL::Crypto
         ${CMAKE_THREAD_LIBS_INIT}
         ${REMOTE_USB_SOCKET_LIBRARIES}
         gtest_main)
@@ -317,9 +346,10 @@ list(FILTER TEST_SOURCES EXCLUDE REGEX "test_virtual_touchscreen_device\.cpp")
 set(ABR_TEST_STUB_SOURCE ${CMAKE_SOURCE_DIR}/tests/unit/abr_test_stubs.cpp)
 list(REMOVE_ITEM TEST_SOURCES ${ABR_TEST_STUB_SOURCE})
 if (WIN32)
-    # These tests depend on generated fake backend paths and run in dedicated
+    # These tests depend on shader or generated backend paths and run in dedicated
     # targets above; do not compile a second copy into the aggregate suite.
     list(REMOVE_ITEM TEST_SOURCES
+            ${HDR_ENCODING_TEST_SOURCE}
             ${PRE_ENCODE_FILTER_TEST_SOURCE}
             ${TRUEHDR_ADAPTER_LOADER_TEST_SOURCE})
 endif ()
@@ -338,6 +368,11 @@ if (TARGET sunshine_rtx_video_adapter)
     add_dependencies(${PROJECT_NAME} sunshine_rtx_video_adapter)
     target_include_directories(${PROJECT_NAME} PRIVATE "${RTX_VIDEO_TRUST_INCLUDE}")
     target_compile_definitions(${PROJECT_NAME} PRIVATE SUNSHINE_RTX_VIDEO_ADAPTER)
+endif ()
+if (TARGET sunshine_dlssnr_adapter)
+    add_dependencies(${PROJECT_NAME} sunshine_dlssnr_adapter)
+    target_include_directories(${PROJECT_NAME} PRIVATE "${DLSSNR_TRUST_INCLUDE}")
+    target_compile_definitions(${PROJECT_NAME} PRIVATE SUNSHINE_DLSSNR_ADAPTER)
 endif ()
 
 foreach(dep ${SUNSHINE_TARGET_DEPENDENCIES})

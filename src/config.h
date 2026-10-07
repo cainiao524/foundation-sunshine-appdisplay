@@ -110,14 +110,6 @@ namespace config {
     std::string encoder;
     std::string adapter_name;
 
-    struct display_mode_remapping_t {
-      std::string type;
-      std::string received_resolution;
-      std::string received_fps;
-      std::string final_resolution;
-      std::string final_refresh_rate;
-    };
-
     std::string output_name;
     std::string capture_target;  // "display" or "window" - determines whether to capture display or window
     std::string window_title;     // Window title to capture when capture_target="window"
@@ -128,7 +120,6 @@ namespace config {
     int refresh_rate_change;
     std::string manual_refresh_rate;
     int hdr_prep;
-    std::vector<display_mode_remapping_t> display_mode_remapping;
     bool variable_refresh_rate;  // Allow video stream framerate to match render framerate for VRR support
     int minimum_fps_target;  // Minimum FPS target (0 = auto, 1-1000 = minimum FPS to maintain)
     bool input_activity_boost;  // Temporarily raise encoding cadence after local input while VRR is active
@@ -144,6 +135,7 @@ namespace config {
   struct audio_t {
     std::string sink;
     std::string virtual_sink;
+    bool keep_sink_default;  // Keep the selected Windows audio output device as the system default while streaming
     std::string microphone_redirect_backend;
     bool stream;
     bool stream_mic;
@@ -156,6 +148,7 @@ namespace config {
 
   struct stream_t {
     std::chrono::milliseconds ping_timeout;
+    bool stop_on_last_video_session;
 
     std::string file_apps;
 
@@ -266,6 +259,9 @@ namespace config {
     std::string password;
     std::string salt;
 
+    // Game Bar 小部件本地端点(/api/widget/*)的访问令牌;为空时该组端点不注册功能(404)
+    std::string widget_token;
+
     std::string config_file;
 
     struct cmd_t {
@@ -301,6 +297,9 @@ namespace config {
   bool
   update_config(const std::map<std::string, std::string> &updates);
 
+  std::optional<std::map<std::string, std::string>>
+  get_config_snapshot();
+
   bool
   update_full_config(const std::map<std::string, std::string> &fullConfig);
 
@@ -320,7 +319,7 @@ namespace config {
 
   /**
    * Persist per-client settings and publish them to the running process.
-   * Unlike update_config(), an unchanged value is still a successful save.
+   * An unchanged value is treated as a successful save.
    */
   bool
   save_clients_config(const std::string &clients);

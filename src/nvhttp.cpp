@@ -8,11 +8,11 @@
 // standard includes
 #include <algorithm>
 #include <array>
-#include <charconv>
 #include <chrono>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <filesystem>
 #include <memory>
@@ -48,6 +48,7 @@
 #include "file_mapping/service.h"
 #include "globals.h"
 #include "hdr/session_target.h"
+#include "image_enhancement/nr_defaults.h"
 #include "http_util.h"
 #include "httpcommon.h"
 #include "logging.h"
@@ -92,8 +93,6 @@ namespace nvhttp {
   };
 
   boost::atomic<uint32_t> session_id_counter {0};
-  static boost::atomic_flag global_cancel_pending = BOOST_ATOMIC_FLAG_INIT;
-
   static tls_client_identity_store_t tls_client_identities;
 
   template <class Request>
@@ -282,11 +281,33 @@ namespace nvhttp {
     launch_session->enable_hdr = util::from_view(get_arg(args, "hdrMode", "0"));
     if (launch_session->enable_hdr) {
       if (const auto app_rtx_hdr = proc::proc.get_app_rtx_hdr_config(launch_session->appid); app_rtx_hdr && app_rtx_hdr->enabled) {
-        launch_session->hdr_backend = hdr_enhanced::manager().acquire_selected();
-        if (launch_session->hdr_backend && launch_session->hdr_backend->id == hdr_enhanced::NVIDIA_RTX_VIDEO_BACKEND) {
+        launch_session->hdr_backend = image_enhancement::manager().acquire_selected(image_enhancement::backend_capability_e::hdr);
+        if (launch_session->hdr_backend && launch_session->hdr_backend->id == image_enhancement::NVIDIA_RTX_VIDEO_BACKEND) {
           launch_session->synthetic_hdr = *app_rtx_hdr;
         }
       }
+    }
+    if (const auto defaults = image_enhancement::load_nr_defaults()) {
+      const auto &f = defaults->filter;
+      launch_session->dlssnr_params.enabled = defaults->enabled;
+      launch_session->dlssnr_params.intensity = f.nr_intensity;
+      launch_session->dlssnr_params.style = f.nr_style;
+      launch_session->dlssnr_params.skin_structure_strength = f.nr_skin_structure_strength;
+      launch_session->dlssnr_params.auto_mask = f.nr_auto_mask;
+      launch_session->dlssnr_params.ui_correction = f.nr_ui_correction;
+      launch_session->dlssnr_params.motion_quality = f.nr_motion_quality;
+      launch_session->dlssnr_scale_percent = f.nr_scale_percent;
+    }
+    // Explicit per-app on/off settings take precedence; inherit uses the saved
+    // stream defaults. The overlay processing scale is currently global.
+    if (const auto app_dlssnr = proc::proc.get_app_dlssnr_config(launch_session->appid)) {
+      launch_session->dlssnr_params = *app_dlssnr;
+    }
+    if (launch_session->dlssnr_params.enabled) {
+      // Reserve both enabled backends until RTSP knows the final wire format.
+      // It selects RTX HDR only for PQ and releases the unused backend;
+      // HLG/SDR must retain NR even when launch initially requested RTX HDR.
+      launch_session->dlssnr_backend = image_enhancement::manager().acquire_selected(image_enhancement::backend_capability_e::nr);
     }
     launch_session->use_vdd = util::from_view(get_arg(args, "useVdd", "0"));
     launch_session->custom_screen_mode = util::from_view(get_arg(args, "customScreenMode", "-1"));
@@ -308,8 +329,6 @@ namespace nvhttp {
       if (!declared_gamepad.empty()) {
         BOOST_LOG(info) << "Client declared gamepad preference: "sv << declared_gamepad;
       }
-      // Publish for the input layer (gamepads arrive after the stream starts).
-      platf::set_client_gamepad_pref(launch_session->client_gamepad);
     }
     const auto hdr_capabilities = hdr::parse_client_display_capabilities(
       find_arg(args, "maxBrightness"),
@@ -322,23 +341,6 @@ namespace nvhttp {
                                           hdr::target_source_e::safe_defaults;
     if (!hdr_capabilities.fallback_reason.empty()) {
       BOOST_LOG(warning) << hdr_capabilities.fallback_reason << "; using safe HDR luminance defaults";
-    }
-
-    // Optional client-measured SDR reference white (moonlight-harmony extension).
-    // Parsed independently: a missing or out-of-range value simply leaves 0.
-    if (const auto sdr_white = find_arg(args, "sdrBrightness")) {
-      int parsed_sdr_white = 0;
-      const char *begin = sdr_white->data();
-      const char *end = begin + sdr_white->size();
-      const auto [position, parse_error] = std::from_chars(begin, end, parsed_sdr_white);
-      if (parse_error == std::errc {} && position == end && parsed_sdr_white >= 50 && parsed_sdr_white <= 1000) {
-        launch_session->reported_hdr_capabilities.sdr_white_nits = static_cast<float>(parsed_sdr_white);
-        launch_session->hdr_capabilities.sdr_white_nits = static_cast<float>(parsed_sdr_white);
-        BOOST_LOG(info) << "Client reported SDR white level: " << parsed_sdr_white << " nits";
-      }
-      else {
-        BOOST_LOG(warning) << "Ignoring out-of-range client SDR white level: " << *sdr_white;
-      }
     }
 
     // Get display_name from query parameter if provided
@@ -359,10 +361,16 @@ namespace nvhttp {
     launch_session->rtsp_url_scheme = launch_session->rtsp_cipher ? "rtspenc://"s : "rtsp://"s;
 
     // Generate the unique identifiers for this connection that we will send later during RTSP handshake
-    unsigned char raw_payload[8];
-    RAND_bytes(raw_payload, sizeof(raw_payload));
-    launch_session->av_ping_payload = util::hex_vec(raw_payload);
-    RAND_bytes((unsigned char *) &launch_session->control_connect_data, sizeof(launch_session->control_connect_data));
+    const auto random_data = crypto::rand(8 + sizeof(launch_session->control_connect_data));
+    if (random_data.size() != 8 + sizeof(launch_session->control_connect_data)) {
+      BOOST_LOG(error) << "Failed to generate launch session random data"sv;
+      return {};
+    }
+    launch_session->av_ping_payload = util::hex_vec(random_data.substr(0, 8));
+    std::memcpy(
+      &launch_session->control_connect_data,
+      random_data.data() + 8,
+      sizeof(launch_session->control_connect_data));
 
     launch_session->iv.resize(16);
     uint32_t prepend_iv = util::endian::big<uint32_t>(util::from_view(get_arg(args, "rikeyid")));
@@ -703,6 +711,12 @@ namespace nvhttp {
 
     host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     const auto launch_session = make_launch_session(host_audio, args);
+    if (!launch_session) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 500);
+      tree.put("root.<xmlattr>.status_message", "Failed to generate launch session credentials");
+      return;
+    }
     const rtsp_stream::launch_preparation_guard_t launch_preparation;
     launch_session->rtsp_peer_address = net::addr_to_normalized_string(request->remote_endpoint().address());
     const auto fingerprint_match = client_fingerprint::match_client(args);
@@ -877,6 +891,12 @@ namespace nvhttp {
       host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     }
     const auto launch_session = make_launch_session(host_audio, args);
+    if (!launch_session) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 500);
+      tree.put("root.<xmlattr>.status_message", "Failed to generate launch session credentials");
+      return;
+    }
     const rtsp_stream::launch_preparation_guard_t launch_preparation;
     if (launch_session->width <= 0 || launch_session->height <= 0 || launch_session->fps <= 0) {
       BOOST_LOG(warning) << "Resume request has no usable mode; keeping the current display resolution and refresh rate for compatibility. "sv
@@ -994,41 +1014,7 @@ namespace nvhttp {
 
     // GameStream 的 /cancel 表示退出当前应用，而普通断开由 RTSP/控制通道处理。
     // 清理可能需要等待编码器和应用退出，不能阻塞 NVHTTP 工作线程。
-    if (!global_cancel_pending.test_and_set(boost::memory_order_acq_rel)) {
-      BOOST_LOG(info) << "Global app cancel accepted; stopping all streaming sessions asynchronously"sv;
-      rtsp_stream::terminate_sessions_async(stream::session::stop_reason_e::client_cancel, []() {
-        auto clear_pending = util::fail_guard([]() {
-          global_cancel_pending.clear(boost::memory_order_release);
-        });
-
-        try {
-          if (proc::proc.running() > 0) {
-            proc::proc.terminate();
-          }
-        }
-        catch (const std::exception &e) {
-          BOOST_LOG(error) << "Failed to terminate the running application during app cancel: "sv << e.what();
-        }
-        catch (...) {
-          BOOST_LOG(error) << "Failed to terminate the running application during app cancel"sv;
-        }
-
-        try {
-          display_device::session_t::get().restore_state();
-        }
-        catch (const std::exception &e) {
-          BOOST_LOG(error) << "Failed to restore display state during app cancel: "sv << e.what();
-        }
-        catch (...) {
-          BOOST_LOG(error) << "Failed to restore display state during app cancel"sv;
-        }
-
-        BOOST_LOG(info) << "Global app cancel cleanup finished"sv;
-      });
-    }
-    else {
-      BOOST_LOG(debug) << "Global app cancel is already in progress"sv;
-    }
+    stream::session::request_global_cancel("Global app cancel"sv);
   }
 
   void
@@ -1130,8 +1116,8 @@ namespace nvhttp {
     std::string usb_forwarding_token;
     bool usb_forwarding_available = false;
     if (config::nvhttp.usb_forwarding_enabled) {
-      std::array<unsigned char, 32> token_bytes {};
-      if (RAND_bytes(token_bytes.data(), static_cast<int>(token_bytes.size())) == 1) {
+      const auto token_bytes = crypto::rand(32);
+      if (token_bytes.size() == 32) {
         usb_forwarding_token = util::hex_vec(token_bytes);
         remote_usb::reverse_tunnel_config tunnel_config;
         tunnel_config.bind_address = bind_address.empty() ? "0.0.0.0" : bind_address;

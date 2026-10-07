@@ -14,6 +14,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 
 // lib includes
 #include <boost/core/noncopyable.hpp>
@@ -332,7 +333,7 @@ namespace platf {
     constexpr caps_t touchpad_frame = 0x20;  // Native precision touchpad frame events
     constexpr caps_t cursor_shape = 0x40;  // Client-rendered cursor shape updates
     constexpr caps_t ds5_haptics_pcm = 0x80;  // Native DualSense authored haptics PCM
-    constexpr caps_t dynamic_sdr_white = 0x100;  // Runtime client SDR reference white updates
+    constexpr caps_t dynamic_sdr_white = 0x100;  // Reserved legacy SDR white updates; never advertised
     constexpr caps_t remote_text_context = 0x200;  // InputPane/UIA text context updates
   };  // namespace platform_caps
 
@@ -549,10 +550,8 @@ namespace platf {
     virtual int
     convert(platf::img_t &img) = 0;
 
-    // Optional: supported HDR converters can apply this at a frame boundary.
-    virtual void
-    set_client_sdr_white_nits(float) {
-    }
+    // Packet-level confirmation, independent of the PQ/HLG transfer function.
+    virtual void report_dolby_vision_output(bool injected, bool enabled) {}
 
     video::sunshine_colorspace_t colorspace;
 
@@ -783,8 +782,36 @@ namespace platf {
     virtual int
     set_sink(const std::string &sink) = 0;
 
+    /**
+     * @brief Restore the previous sink only when this controller still owns the default sink.
+     * @param sink Sink to restore.
+     * @returns True when the platform handled the decision, including skipping restoration
+     *          because the user selected another default sink; false when the platform has
+     *          no ownership-aware implementation.
+     */
+    virtual bool
+    restore_sink_if_assigned(const std::string &sink) {
+      return false;
+    }
+
+    virtual bool
+    has_assigned_sink() {
+      return false;
+    }
+
     virtual std::unique_ptr<mic_t>
     microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, bool continuous) = 0;
+
+    /**
+     * @brief Create a capture client for a selected sink.
+     * @param sink Sink to capture. An empty sink follows the current default device.
+     * @returns The capture client, or null on failure. Platforms without explicit sink
+     *          capture can fall back to their default microphone implementation.
+     */
+    virtual std::unique_ptr<mic_t>
+    microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, bool continuous, const std::string &sink) {
+      return microphone(mapping, channels, sample_rate, frame_size, continuous);
+    }
 
     /**
      * @brief Check if the audio sink is available in the system.
@@ -1093,18 +1120,16 @@ namespace platf {
   set_mouse_mode(int mode);
   /**
    * @brief Select the gamepad emulation policy for the currently running app.
-   * @param mode 0=inherit global, 1=auto, 2=Xbox 360, 3=DualShock 4.
+   * @param mode 0=inherit global, 1=auto, 2=Xbox 360, 3=DualShock 4, 4=DualSense.
    */
   void
   set_gamepad_mode(int mode);
   /**
-   * @brief Publish the client-declared controller type for the upcoming session.
-   * @param pref Empty = undeclared (host-side selection chain applies),
-   *             otherwise one of: auto, x360, ds4, ds5. Consumed per gamepad
-   *             allocation while the session streams; re-set on every launch.
+   * @brief Hot-apply the persisted global gamepad policy for future allocations.
+   * @param preference One of: auto, x360, ds4, ds5.
    */
   void
-  set_client_gamepad_pref(std::string pref);
+  set_global_gamepad_mode(std::string_view preference);
   void
   abs_mouse(input_t &input, const touch_port_t &touch_port, float x, float y);
   void
@@ -1194,19 +1219,38 @@ namespace platf {
    * @param id The gamepad ID.
    * @param metadata Controller metadata from client (empty if none provided).
    * @param feedback_queue The queue for posting messages back to the client.
+   * @param client_gamepad Client-declared gamepad type for this session, or empty when undeclared.
    * @return 0 on success.
    */
   int
-  alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue);
+  alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &metadata,
+                feedback_queue_t feedback_queue, std::string_view client_gamepad);
   void
   free_gamepad(input_t &input, int nr);
+  /**
+   * @brief Check whether an allocated gamepad is backed by the DualSense path.
+   * @param input The global platform input context.
+   * @param nr The global gamepad index.
+   * @return true only when the platform allocated a DualSense for this index.
+   */
+  bool
+  gamepad_is_ds5(input_t &input, int nr);
+
+  /**
+   * @brief 检查已分配的 DualSense 音频触觉会话是否仍可用。
+   * @param input 平台输入上下文。
+   * @return 音频触觉协商成功且未降级或断线时返回 true。
+   */
+  bool
+  gamepad_has_ds5_audio_haptics(input_t &input);
 
   /**
    * @brief Get the supported platform capabilities to advertise to the client.
+   * @param client_gamepad Client-declared gamepad type for this session, or empty when undeclared.
    * @return Capability flags.
    */
   platform_caps::caps_t
-  get_capabilities();
+  get_capabilities(std::string_view client_gamepad);
 
 #define SERVICE_NAME "Sunshine"
 #define SERVICE_TYPE "_nvstream._tcp"

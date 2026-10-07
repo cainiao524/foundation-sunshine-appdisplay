@@ -45,6 +45,7 @@ extern "C" {
 #include "video_probe.h"
 
 #ifdef _WIN32
+  #include "nvenc/win/nvenc_dynamic_factory.h"
 extern "C" {
   #include <libavutil/hwcontext_d3d11va.h>
 }
@@ -133,8 +134,70 @@ namespace video {
     updated.id = id;
     std::lock_guard lock { hdr_pipeline_status_mutex };
     if (hdr_pipeline_statuses.contains(id)) {
+      updated.nr_requested_enabled = hdr_pipeline_statuses[id].nr_requested_enabled;
+      updated.nr_requested_scale_percent = hdr_pipeline_statuses[id].nr_requested_scale_percent;
+      updated.nr_requested_intensity = hdr_pipeline_statuses[id].nr_requested_intensity;
+      updated.nr_requested_ui_correction = hdr_pipeline_statuses[id].nr_requested_ui_correction;
+      updated.nr_requested_motion_quality = hdr_pipeline_statuses[id].nr_requested_motion_quality;
+      updated.nr_requested_style = hdr_pipeline_statuses[id].nr_requested_style;
+      updated.nr_requested_skin_structure_strength = hdr_pipeline_statuses[id].nr_requested_skin_structure_strength;
+      updated.nr_requested_auto_mask = hdr_pipeline_statuses[id].nr_requested_auto_mask;
+      updated.nr_request_revision = hdr_pipeline_statuses[id].nr_request_revision;
       hdr_pipeline_statuses[id] = std::move(updated);
     }
+  }
+
+  int
+  request_nr_enabled(std::uint64_t id, bool enabled, std::optional<int> scale_percent,
+    std::optional<float> intensity, std::optional<bool> ui_correction, std::optional<int> motion_quality, std::optional<int> style,
+    std::optional<float> skin_structure_strength, std::optional<bool> auto_mask) {
+    if (scale_percent && !platf::valid_nr_scale(*scale_percent)) return 400;
+    if (intensity && (!std::isfinite(*intensity) || *intensity < 0.0f || *intensity > 1.0f)) return 400;
+    if (style && (*style < 0 || *style > 4)) return 400;
+    if (skin_structure_strength && (!std::isfinite(*skin_structure_strength) || *skin_structure_strength < 0 || *skin_structure_strength > 1)) return 400;
+    if (motion_quality && (*motion_quality < 0 || *motion_quality > 3)) return 400;
+    std::lock_guard lock { hdr_pipeline_status_mutex };
+    const auto it = hdr_pipeline_statuses.find(id);
+    if (it == hdr_pipeline_statuses.end()) return 404;
+    if (!it->second.nr_toggle_supported) return 409;
+    it->second.nr_requested_enabled = enabled;
+    if (scale_percent) it->second.nr_requested_scale_percent = *scale_percent;
+    if (intensity) it->second.nr_requested_intensity = *intensity;
+    if (ui_correction) it->second.nr_requested_ui_correction = *ui_correction;
+    if (motion_quality) it->second.nr_requested_motion_quality = *motion_quality;
+    if (style) it->second.nr_requested_style = *style;
+    if (skin_structure_strength) it->second.nr_requested_skin_structure_strength = *skin_structure_strength;
+    if (auto_mask) it->second.nr_requested_auto_mask = *auto_mask;
+    ++it->second.nr_request_revision;
+    return 202;
+  }
+
+  std::optional<nr_request_t>
+  requested_nr_settings(std::uint64_t id) {
+    std::lock_guard lock { hdr_pipeline_status_mutex };
+    const auto it = hdr_pipeline_statuses.find(id);
+    if (it == hdr_pipeline_statuses.end() || !it->second.nr_toggle_supported) return std::nullopt;
+    return nr_request_t { it->second.nr_requested_enabled, it->second.nr_requested_scale_percent,
+      it->second.nr_requested_intensity, it->second.nr_requested_ui_correction,
+      it->second.nr_requested_motion_quality, it->second.nr_request_revision,
+      it->second.nr_requested_style, it->second.nr_requested_skin_structure_strength, it->second.nr_requested_auto_mask };
+  }
+
+  bool
+  rollback_nr_settings(std::uint64_t id, const nr_request_t &failed, const nr_request_t &previous) {
+    std::lock_guard lock { hdr_pipeline_status_mutex };
+    const auto it = hdr_pipeline_statuses.find(id);
+    if (it == hdr_pipeline_statuses.end() || !it->second.nr_requested_enabled ||
+        it->second.nr_request_revision != failed.revision) return false;
+    it->second.nr_requested_scale_percent = previous.scale_percent;
+    it->second.nr_requested_intensity = previous.intensity;
+    it->second.nr_requested_ui_correction = previous.ui_correction;
+    it->second.nr_requested_motion_quality = previous.motion_quality;
+    it->second.nr_requested_style = previous.style;
+    it->second.nr_requested_skin_structure_strength = previous.skin_structure_strength;
+    it->second.nr_requested_auto_mask = previous.auto_mask;
+    ++it->second.nr_request_revision;
+    return true;
   }
 
   void
@@ -664,9 +727,6 @@ namespace video {
           }
           break;
         }
-        case dynamic_param_type_e::CLIENT_SDR_WHITE_NITS:
-          device->set_client_sdr_white_nits(param.value.float_value);
-          break;
         default:
           BOOST_LOG(warning) << "AVCodec encoder: Unsupported dynamic parameter type: " << (int) param.type;
           break;
@@ -770,6 +830,10 @@ namespace video {
     /// enables it in make_nvenc_encode_session().
     dolby_vision::rpu_injector_t dolby_vision_;
 
+    void report_dolby_vision_output(bool injected) {
+      if (device) device->report_dolby_vision_output(injected, dolby_vision_.enabled());
+    }
+
     int
     convert(platf::img_t &img) override {
       if (!device) return -1;
@@ -853,9 +917,6 @@ namespace video {
           BOOST_LOG(info) << "NVENC encoder VBV buffer size change requested: " << param.value.int_value << " Kbps";
           break;
         }
-        case dynamic_param_type_e::CLIENT_SDR_WHITE_NITS:
-          device->set_client_sdr_white_nits(param.value.float_value);
-          break;
         default:
           BOOST_LOG(warning) << "NVENC encoder: Unsupported dynamic parameter type: " << (int) param.type;
           break;
@@ -941,6 +1002,10 @@ namespace video {
     /// enables it in make_amf_encode_session().
     dolby_vision::rpu_injector_t dolby_vision_;
 
+    void report_dolby_vision_output(bool injected) {
+      if (device) device->report_dolby_vision_output(injected, dolby_vision_.enabled());
+    }
+
     int
     convert(platf::img_t &img) override {
       if (!device) return -1;
@@ -989,9 +1054,6 @@ namespace video {
       switch (param.type) {
         case dynamic_param_type_e::BITRATE:
           set_bitrate(param.value.int_value);
-          break;
-        case dynamic_param_type_e::CLIENT_SDR_WHITE_NITS:
-          device->set_client_sdr_white_nits(param.value.float_value);
           break;
         default:
           break;
@@ -1663,22 +1725,6 @@ namespace video {
   active_encoder_name() {
     const auto *encoder = active_encoder_for_status.load(std::memory_order_acquire);
     return encoder ? std::string { encoder->name } : std::string {};
-  }
-
-  bool
-  active_encoder_supports_dynamic_sdr_white() {
-    const auto *encoder = active_encoder_for_status.load(std::memory_order_acquire);
-    if (!encoder) {
-      return false;
-    }
-
-    return dynamic_cast<const encoder_platform_formats_nvenc *>(encoder->platform_formats.get()) != nullptr ||
-           dynamic_cast<const encoder_platform_formats_amf *>(encoder->platform_formats.get()) != nullptr;
-  }
-
-  bool
-  is_valid_client_sdr_white_nits(float nits) {
-    return std::isfinite(nits) && nits >= 50.0f && nits <= 1000.0f;
   }
 
   void
@@ -2399,7 +2445,8 @@ namespace video {
 
     // The RPU rides with the access unit it was generated for, matched by the
     // encoder's own frame index round trip — never by callback order.
-    session.dolby_vision_.inject(encoded_frame.frame_index, encoded_frame.data);
+    const bool dv_injected = session.dolby_vision_.inject(encoded_frame.frame_index, encoded_frame.data);
+    session.report_dolby_vision_output(dv_injected);
 
     auto packet = std::make_unique<packet_raw_generic>(std::move(encoded_frame.data), encoded_frame.frame_index, encoded_frame.idr);
     packet->channel_data = channel_data;
@@ -2457,7 +2504,8 @@ namespace video {
 
     // AMF may return an older frame than the one submitted; the RPU splice
     // keys on the encoder's own output index, so pipeline lag cannot mismatch.
-    session.dolby_vision_.inject(encoded_frame.frame_index, encoded_frame.data);
+    const bool dv_injected = session.dolby_vision_.inject(encoded_frame.frame_index, encoded_frame.data);
+    session.report_dolby_vision_output(dv_injected);
 
     auto packet = std::make_unique<packet_raw_generic>(std::move(encoded_frame.data), encoded_frame.frame_index, encoded_frame.idr);
     packet->channel_data = channel_data;
@@ -3464,12 +3512,6 @@ namespace video {
       while (dynamic_param_events_ptr->peek()) {
         if (auto param = dynamic_param_events_ptr->pop(0ms)) {
           BOOST_LOG(info) << "Applying dynamic parameter change: type=" << (int) param->type;
-          if (param->type == dynamic_param_type_e::CLIENT_SDR_WHITE_NITS) {
-            // Keep the latest value in the video-thread-owned config. If the
-            // encoder is recreated after a display/capture reinit, device
-            // construction will apply this value again.
-            config.hdr_capabilities.sdr_white_nits = param->value.float_value;
-          }
           session->set_dynamic_param(*param);
         }
       }
@@ -3584,8 +3626,8 @@ namespace video {
   /**
    * @brief Disable the pre-encode filter when the opened display cannot satisfy
    *        its preconditions, keeping the wire signal consistent with the pixels
-   *        actually produced. An HDR source or unsupported capture path must use
-   *        the normal pipeline instead of advertising synthetic HDR output.
+   *        actually produced. HDR sources allow signal-preserving NR but cannot
+   *        feed an SDR-to-HDR filter. Unsupported capture paths bypass all filters.
    */
   void
   strip_unusable_pre_encode_filter(platf::display_t &disp, config_t &config) {
@@ -3593,9 +3635,9 @@ namespace video {
       return;
     }
     if (!disp.supports_pre_encode_filter()) {
-      BOOST_LOG(warning) << "Pre-encode filter is not supported by this capture/encode path; disabling RTX HDR for this session"sv;
+      BOOST_LOG(warning) << "Pre-encode filter is not supported by this capture/encode path; disabling image enhancement for this session"sv;
     }
-    else if (disp.is_hdr()) {
+    else if (disp.is_hdr() && config.pre_encode_filter != platf::pre_encode_filter_e::external_neural_enhancement) {
       BOOST_LOG(warning) << "Source display is already in HDR mode (source_display_not_sdr); disabling RTX HDR for this session"sv;
     }
     else {
@@ -4528,6 +4570,15 @@ namespace video {
     }
 
     const auto probe_capture_override = capture_override_for_encoder_probe();
+
+#ifdef _WIN32
+    // Reuse CUDA interop across this probe's short-lived 10-bit 4:4:4
+    // candidates, but release it on every exit when no real encoder needs it.
+    // The token itself does not initialize CUDA or create a GPU context.
+    const auto nvenc_factory = nvenc::nvenc_dynamic_factory::get();
+    const auto cuda_probe_contexts = nvenc_factory ? nvenc_factory->retain_cuda_interop_contexts() : nullptr;
+#endif
+
     const auto configured_output_name = target ? target->output_name : config::video.output_name;
     const bool target_requires_exact_resolution = target && target->policy == probe_target_policy_e::exact;
     const auto configured_display_name = display_device::get_display_name(configured_output_name);

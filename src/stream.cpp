@@ -44,7 +44,6 @@ extern "C" {
 #include "config.h"
 #include "display_device/display_device.h"
 #include "display_device/session.h"
-#include "ds5/config.h"
 #include "globals.h"
 #include "haptics/authored_ir.h"
 #include "rtsp.h"
@@ -140,6 +139,8 @@ namespace stream {
   }
 
   namespace {
+    boost::atomic_flag global_cancel_pending = BOOST_ATOMIC_FLAG_INIT;
+
     std::uint32_t
     read_dynamic_param_u32(std::string_view payload, std::size_t offset) {
       return static_cast<std::uint32_t>(static_cast<unsigned char>(payload[offset])) |
@@ -592,6 +593,7 @@ namespace stream {
 
     // 添加客户端名称字段
     std::string client_name;
+    std::string client_gamepad;
     std::string client_cert_uuid;
     bool use_vdd {false};
     int custom_screen_mode {-1};
@@ -688,9 +690,6 @@ namespace stream {
     bool frame_pipeline_policy_resolved { false };
     hdr::client_display_capabilities_t hdr_capabilities;
     hdr::client_display_capabilities_t reported_hdr_capabilities;
-    // Runtime SDR white updates are consumed by the video thread and may also
-    // be needed by a control-thread display reconfiguration.
-    std::atomic<float> dynamic_sdr_white_nits { 0.0f };
     hdr::target_source_e hdr_target_source { hdr::target_source_e::safe_defaults };
 
     safe::mail_raw_t::event_t<bool> shutdown_event;
@@ -1966,9 +1965,6 @@ namespace stream {
       temp_launch_session.custom_screen_mode = session->custom_screen_mode;
       temp_launch_session.hdr_capabilities = session->hdr_capabilities;
       temp_launch_session.reported_hdr_capabilities = session->reported_hdr_capabilities;
-      const auto dynamic_sdr_white_nits = session->dynamic_sdr_white_nits.load(std::memory_order_acquire);
-      temp_launch_session.hdr_capabilities.sdr_white_nits = dynamic_sdr_white_nits;
-      temp_launch_session.reported_hdr_capabilities.sdr_white_nits = dynamic_sdr_white_nits;
       temp_launch_session.hdr_target_source = session->hdr_target_source;
 
       bool active_display_resolved = true;
@@ -2124,35 +2120,9 @@ namespace stream {
         return;
       }
 
-      // This is an HDR conversion parameter, not part of the display/VDD HDR
-      // capability tuple. Apply it on the video thread without rebuilding the
-      // display or encoder.
       if (param_type_enum == video::dynamic_param_type_e::CLIENT_SDR_WHITE_NITS) {
-        constexpr size_t SDR_WHITE_PAYLOAD_SIZE = WIRE_WORD_SIZE * 2;
-        if (payload.size() != SDR_WHITE_PAYLOAD_SIZE) {
-          BOOST_LOG(warning) << "Invalid payload size for client SDR white. Expected "
-                             << SDR_WHITE_PAYLOAD_SIZE << " bytes, got " << payload.size();
-          return;
-        }
-        if (session->config.controlProtocolType != 13 || session->config.monitor.dynamicRange == 0) {
-          BOOST_LOG(warning) << "Ignoring client SDR white update outside an encrypted HDR session";
-          return;
-        }
-
-        const float sdr_white_nits = read_dynamic_param_f32(payload, WIRE_WORD_SIZE);
-        if (!video::is_valid_client_sdr_white_nits(sdr_white_nits)) {
-          BOOST_LOG(warning) << "Invalid client SDR white value: " << sdr_white_nits;
-          return;
-        }
-
-        video::dynamic_param_t param {};
-        param.type = video::dynamic_param_type_e::CLIENT_SDR_WHITE_NITS;
-        param.value.float_value = sdr_white_nits;
-        param.valid = true;
-        session->dynamic_sdr_white_nits.store(sdr_white_nits, std::memory_order_release);
-        session->video.dynamic_param_change_events->raise(param);
-
-        BOOST_LOG(info) << "Dynamic client SDR white change: " << sdr_white_nits << " nits";
+        // Legacy clients may still send this retired parameter. Ignore it:
+        // SDR white cannot identify SDR pixels in an already composed HDR frame.
         return;
       }
 
@@ -2441,10 +2411,9 @@ namespace stream {
             has_session_awaiting_peer = true;
           }
           else {
-            const auto ds5_settings = ds5_config::current();
+            // 音频触觉转普通振动也需要及时处理反馈，不能只按客户端 PCM/IR 能力判断。
             has_ds5_haptics_session |=
-              (session->config.mlFeatureFlags & (ML_FF_DS5_HAPTICS_PCM | ML_FF_DS5_HAPTICS_IR_V2)) != 0 ||
-              (ds5_settings.enabled && ds5_settings.audio_haptics);
+              input::has_ds5_audio_haptics(session->input);
             auto &feedback_queue = session->control.feedback_queue;
             while (feedback_queue->peek()) {
               auto feedback_msg = feedback_queue->pop();
@@ -4150,6 +4119,57 @@ namespace stream {
     }
 
     void
+    request_global_cancel(std::string_view source, bool require_no_video_session) {
+      if (!global_cancel_pending.test_and_set(boost::memory_order_acq_rel)) {
+        BOOST_LOG(info) << source << " accepted; stopping all streaming sessions asynchronously"sv;
+        rtsp_stream::terminate_sessions_async_if(
+          stop_reason_e::client_cancel,
+          [require_no_video_session]() {
+            return !require_no_video_session ||
+                   (video_session_count() == 0 &&
+                    rtsp_stream::pending_session_count() == 0);
+          },
+          [](bool termination_started) {
+            auto clear_pending = util::fail_guard([]() {
+              global_cancel_pending.clear(boost::memory_order_release);
+            });
+
+            if (!termination_started) {
+              return;
+            }
+
+            try {
+              if (proc::proc.running() > 0) {
+                proc::proc.terminate();
+              }
+            }
+            catch (const std::exception &e) {
+              BOOST_LOG(error) << "Failed to terminate the running application during app cancel: "sv << e.what();
+            }
+            catch (...) {
+              BOOST_LOG(error) << "Failed to terminate the running application during app cancel"sv;
+            }
+
+            try {
+              display_device::session_t::get().restore_state();
+            }
+            catch (const std::exception &e) {
+              BOOST_LOG(error) << "Failed to restore display state during app cancel: "sv << e.what();
+            }
+            catch (...) {
+              BOOST_LOG(error) << "Failed to restore display state during app cancel"sv;
+            }
+
+            BOOST_LOG(info) << "Global app cancel cleanup finished"sv;
+          }
+        );
+      }
+      else {
+        BOOST_LOG(debug) << "Global app cancel is already in progress"sv;
+      }
+    }
+
+    void
     stop(session_t &session, stop_reason_e reason) {
       while_starting_do_nothing(session.lifecycle);
       if (!session.lifecycle.request_stop(reason)) {
@@ -4214,6 +4234,8 @@ namespace stream {
                            << (was_registered ? " released"sv : " was already absent"sv);
         }
 
+        const auto stop_reason = session.lifecycle.snapshot().stop_reason;
+
         // If this is the last non-control-only session, invoke the platform callbacks
         if (unregister_video_session() == 0) {
           bool restore_display_state { true };
@@ -4243,6 +4265,12 @@ namespace stream {
 #endif
 
           platf::streaming_will_stop();
+
+          if (config::stream.stop_on_last_video_session &&
+              stop_reason != stop_reason_e::client_cancel &&
+              stop_reason != stop_reason_e::host_terminate) {
+            request_global_cancel("Automatic cancel after the last video session ended"sv, true);
+          }
         }
       }
 
@@ -4288,7 +4316,7 @@ namespace stream {
 
     int
     start(session_t &session, const std::string &addr_string) {
-      session.input = input::alloc(session.mail, session.launch_session_id);
+      session.input = input::alloc(session.mail, session.launch_session_id, session.client_gamepad);
 
       session.broadcast_ref = broadcast_shared.ref();
       if (!session.broadcast_ref) {
@@ -4446,6 +4474,7 @@ namespace stream {
 
       // 设置客户端名称
       session->client_name = launch_session.client_name;
+      session->client_gamepad = launch_session.client_gamepad;
       session->client_cert_uuid = launch_session.client_cert_uuid;
       session->use_vdd = launch_session.use_vdd;
       session->custom_screen_mode = launch_session.custom_screen_mode;
@@ -4461,9 +4490,6 @@ namespace stream {
       session->frame_pipeline_policy_resolved = launch_session.frame_pipeline_policy_resolved;
       session->hdr_capabilities = launch_session.hdr_capabilities;
       session->reported_hdr_capabilities = launch_session.reported_hdr_capabilities;
-      session->dynamic_sdr_white_nits.store(
-        launch_session.hdr_capabilities.sdr_white_nits,
-        std::memory_order_release);
       session->hdr_target_source = launch_session.hdr_target_source;
 
       session->config = config;

@@ -86,23 +86,6 @@ TEST(AppDisplayIntegration, NoProfilePreservesGlobalManualModes) {
   EXPECT_NEAR(double(result->refresh_rate->numerator) / result->refresh_rate->denominator, 59.94, 0.0001);
 }
 
-TEST(AppDisplayIntegration, RemappingCannotOverrideFixedModeButInheritedRefreshStillRemaps) {
-  auto video = config::video;
-  video.resolution_change = 1;
-  video.refresh_rate_change = 1;
-  video.display_mode_remapping = {
-    {"mixed", "2560x1440", "60", "1280x720", "30"},
-    {"refresh_rate_only", "", "60", "", "120"}};
-  auto session = launch();
-  session.app_display_profile = profile("display-resolution", "2560x1440");
-  const auto result = display_device::make_parsed_config(video, session, true);
-  ASSERT_TRUE(result);
-  ASSERT_TRUE(result->resolution);
-  ASSERT_TRUE(result->refresh_rate);
-  EXPECT_EQ(result->resolution->width, 2560);
-  EXPECT_EQ(result->refresh_rate->numerator, 120);
-}
-
 TEST(AppDisplayIntegration, ResumeWithZeroModeKeepsUpstreamModeGuard) {
   auto video = config::video;
   auto session = launch();

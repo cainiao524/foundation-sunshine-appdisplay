@@ -10,11 +10,13 @@ set(BOOST_COMPONENTS
         asio
         beast
         filesystem
+        format
         function
         locale
         log
         process
         program_options
+        property_tree
         system
         thread
 )
@@ -50,9 +52,7 @@ if(NOT Boost_FOUND)
 
     # more components required for compiling boost targets
     list(APPEND BOOST_COMPONENTS
-            crc
-            format
-            property_tree)
+            crc)
 
     set(BOOST_ENABLE_CMAKE ON)
 

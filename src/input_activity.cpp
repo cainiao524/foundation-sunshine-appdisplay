@@ -10,6 +10,7 @@
 #include "config.h"
 #include "cursor_channel.h"
 #include "input_activity.h"
+#include "pen_protocol.h"
 #include "utility.h"
 
 namespace input::activity {
@@ -55,6 +56,16 @@ namespace input::activity {
       case KEY_UP_EVENT_MAGIC:
       case UTF8_TEXT_EVENT_MAGIC:
         return config::input.keyboard;
+      case SS_PEN_MAGIC:
+        if (payload_size < sizeof(SS_PEN_PACKET)) {
+          return std::nullopt;
+        }
+        return false;
+      case pen_protocol::barrel_magic:
+        if (payload_size < sizeof(pen_protocol::barrel_packet_t)) {
+          return std::nullopt;
+        }
+        return false;
       default:
         return false;
     }

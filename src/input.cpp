@@ -23,6 +23,7 @@ extern "C" {
 #include "input.h"
 #include "text_context/bridge.h"
 #include "input_activity.h"
+#include "pen_protocol.h"
 #include "logging.h"
 #include "platform/common.h"
 #include "display_device/session.h"
@@ -121,6 +122,12 @@ namespace input {
   std::function<void(const testing::keyboard_event_t &)> &
   keyboard_sink() {
     static std::function<void(const testing::keyboard_event_t &)> sink;
+    return sink;
+  }
+
+  std::function<void(const platf::pen_input_t &)> &
+  pen_sink() {
+    static std::function<void(const platf::pen_input_t &)> sink;
     return sink;
   }
 #endif
@@ -615,6 +622,13 @@ namespace input {
       case SS_PEN_MAGIC:
         print((PSS_PEN_PACKET) payload);
         break;
+      case pen_protocol::barrel_magic: {
+        const auto packet = static_cast<pen_protocol::barrel_packet_t *>(payload);
+        print(&packet->pen);
+        BOOST_LOG(debug) << "barrelRoll: "sv
+                         << pen_protocol::normalize_angle(util::endian::little(packet->barrelRoll));
+        break;
+      }
       case SS_CONTROLLER_ARRIVAL_MAGIC:
         print((PSS_CONTROLLER_ARRIVAL_PACKET) payload);
         break;
@@ -1352,7 +1366,7 @@ namespace input {
    * @param packet The pen packet.
    */
   void
-  passthrough(std::shared_ptr<input_t> &input, PSS_PEN_PACKET packet) {
+  passthrough(std::shared_ptr<input_t> &input, PSS_PEN_PACKET packet, std::uint16_t barrel_roll = LI_ROT_UNKNOWN) {
     if (!config::input.mouse) {
       return;
     }
@@ -1400,9 +1414,14 @@ namespace input {
       from_clamped_netfloat(packet->pressureOrDistance, 0.0f, 1.0f),
       contact_area.first,
       contact_area.second,
+      pen_protocol::effective_barrel_roll(rotation, barrel_roll),
     };
 
 #ifdef SUNSHINE_TESTS
+    if (pen_sink()) {
+      pen_sink()(pen);
+      return;
+    }
     if (!input->client_context) {
       return;
     }
@@ -2006,6 +2025,15 @@ namespace input {
         return batch((PSS_TOUCHPAD_FRAME_PACKET) dest, (PSS_TOUCHPAD_FRAME_PACKET) src);
       case SS_PEN_MAGIC:
         return batch((PSS_PEN_PACKET) dest, (PSS_PEN_PACKET) src);
+      case pen_protocol::barrel_magic: {
+        auto extended_dest = reinterpret_cast<pen_protocol::barrel_packet_t *>(dest);
+        auto extended_src = reinterpret_cast<pen_protocol::barrel_packet_t *>(src);
+        auto result = batch(&extended_dest->pen, &extended_src->pen);
+        if (result == batch_result_e::batched) {
+          extended_dest->barrelRoll = extended_src->barrelRoll;
+        }
+        return result;
+      }
       case SS_CONTROLLER_TOUCH_MAGIC:
         return batch((PSS_CONTROLLER_TOUCH_PACKET) dest, (PSS_CONTROLLER_TOUCH_PACKET) src);
       case SS_CONTROLLER_MOTION_MAGIC:
@@ -2120,6 +2148,11 @@ namespace input {
       case SS_PEN_MAGIC:
         passthrough(input, (PSS_PEN_PACKET) payload);
         break;
+      case pen_protocol::barrel_magic: {
+        auto packet = reinterpret_cast<pen_protocol::barrel_packet_t *>(payload);
+        passthrough(input, &packet->pen, util::endian::little(packet->barrelRoll));
+        break;
+      }
       case SS_CONTROLLER_ARRIVAL_MAGIC:
         passthrough(input, (PSS_CONTROLLER_ARRIVAL_PACKET) payload);
         break;
@@ -2247,6 +2280,21 @@ namespace input {
     void
     set_keyboard_sink(std::function<void(const keyboard_event_t &)> sink) {
       keyboard_sink() = std::move(sink);
+    }
+
+    void
+    set_pen_sink(std::function<void(const platf::pen_input_t &)> sink) {
+      pen_sink() = std::move(sink);
+    }
+
+    void
+    process_packets(std::shared_ptr<input_t> &input, const touch_port_t &port,
+                    const std::vector<std::vector<std::uint8_t>> &packets) {
+      input->touch_port = port;
+      input->input_queue.insert(input->input_queue.end(), packets.begin(), packets.end());
+      while (!input->input_queue.empty()) {
+        passthrough_next_message(input);
+      }
     }
 
     void

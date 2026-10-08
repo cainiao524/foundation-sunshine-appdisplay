@@ -439,12 +439,13 @@ namespace platf {
     std::uint8_t toolType;
     std::uint8_t penButtons;
     std::uint8_t tilt;  // Degrees (0..90) or LI_TILT_UNKNOWN
-    std::uint16_t rotation;  // Degrees (0..360) or LI_ROT_UNKNOWN
+    std::uint16_t rotation;  // Tilt azimuth in degrees (0..359) or LI_ROT_UNKNOWN
     float x;
     float y;
     float pressureOrDistance;  // Distance for hover and pressure for contact
     float contactAreaMajor;
     float contactAreaMinor;
+    std::uint16_t barrelRoll = LI_ROT_UNKNOWN;  // Axial rotation (0..359) or LI_ROT_UNKNOWN
   };
 
   class deinit_t {

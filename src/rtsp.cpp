@@ -1193,6 +1193,14 @@ namespace rtsp_stream {
         caps |= platf::platform_caps::remote_text_context;
       }
       ss << "a=x-ss-general.featureFlags:" << caps << std::endl;
+#ifdef _WIN32
+      // Sunshine 1005-compatible clients use a separate pen packet carrying
+      // barrel roll without replacing the azimuth needed for tilt. Only the
+      // Windows backend currently injects axial rotation into the OS.
+      if (config::input.mouse && (caps & platf::platform_caps::pen_touch)) {
+        ss << "a=x-ss-general.penBarrelRoll:1" << std::endl;
+      }
+#endif
     }
 
     // Always request new control stream encryption if the client supports it

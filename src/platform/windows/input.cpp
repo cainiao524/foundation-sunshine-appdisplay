@@ -1888,9 +1888,10 @@ namespace platf {
       penInfo.pressure = 0;
     }
 
-    if (pen.rotation != LI_ROT_UNKNOWN) {
+    // Barrel roll is independent of the azimuth used below for pen tilt.
+    if (pen.barrelRoll != LI_ROT_UNKNOWN) {
       penInfo.penMask |= PEN_MASK_ROTATION;
-      penInfo.rotation = pen.rotation;
+      penInfo.rotation = pen.barrelRoll % 360;
     }
     else {
       penInfo.rotation = 0;

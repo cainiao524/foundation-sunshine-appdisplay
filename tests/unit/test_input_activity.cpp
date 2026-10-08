@@ -13,6 +13,7 @@
 #include <src/config.h>
 #include <src/cursor_channel.h>
 #include <src/input_activity.h>
+#include <src/pen_protocol.h>
 #include <src/utility.h>
 
 #ifdef INPUT_ACTIVITY_STANDALONE_TEST
@@ -128,6 +129,8 @@ TEST_F(InputActivityTest, RejectsTruncatedPacketsBeforeReadingEventFields) {
     {MOUSE_MOVE_REL_MAGIC_GEN5, sizeof(NV_REL_MOUSE_MOVE_PACKET)},
     {SCROLL_MAGIC_GEN5, sizeof(NV_SCROLL_PACKET)},
     {SS_HSCROLL_MAGIC, sizeof(SS_HSCROLL_PACKET)},
+    {SS_PEN_MAGIC, sizeof(SS_PEN_PACKET)},
+    {input::pen_protocol::barrel_magic, sizeof(input::pen_protocol::barrel_packet_t)},
   };
 
   input::activity::tracker_t tracker;

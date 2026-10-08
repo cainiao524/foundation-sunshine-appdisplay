@@ -5,6 +5,7 @@
 #pragma once
 
 #include <functional>
+#include <vector>
 
 #include "platform/common.h"
 #include "thread_safe.h"
@@ -88,6 +89,13 @@ namespace input {
 
     void
     set_keyboard_sink(std::function<void(const keyboard_event_t &)> sink);
+
+    void
+    set_pen_sink(std::function<void(const platf::pen_input_t &)> sink);
+
+    void
+    process_packets(std::shared_ptr<input_t> &input, const touch_port_t &port,
+                    const std::vector<std::vector<std::uint8_t>> &packets);
 
     void
     send_keyboard_packet(std::shared_ptr<input_t> &input, std::uint16_t key_code,

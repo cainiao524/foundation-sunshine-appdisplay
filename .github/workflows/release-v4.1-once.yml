@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   release:
-    uses: cainiao524/foundation-sunshine-appdisplay/.github/workflows/main.yml@release/v4.1
+    uses: cainiao524/foundation-sunshine-appdisplay/.github/workflows/v4.1-reusable-target.yml@release/v4.1
     with:
       build-version: v4.1
       publish-release: true

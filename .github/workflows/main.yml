@@ -146,8 +146,8 @@ jobs:
           git fetch --no-tags --no-recurse-submodules origin "$SOURCE_REF"
           SOURCE_REF=$(git rev-parse 'FETCH_HEAD^{commit}')
           if [ "$PUBLISH_RELEASE" = "true" ]; then
-            if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
-              echo '::error::正式发布只能由用户手动触发 main.yml。'
+            if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ "${{ github.event_name }}" != "workflow_call" ]; then
+              echo '::error::正式发布只能由用户手动触发 main.yml 或经授权的可复用工作流调用。'
               exit 1
             fi
             if [ -z "$REQUESTED_TAG" ]; then

@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -20,6 +21,10 @@
 
 namespace rtsp_stream {
   struct launch_session_t;
+}
+
+namespace video_fec {
+  class controller_t;
 }
 
 namespace stream {
@@ -46,6 +51,8 @@ namespace stream {
 
     int packetsize;
     int minRequiredFecPackets;
+    std::shared_ptr<video_fec::controller_t> fec_control;
+    bool fec_feedback = false;
     int mlFeatureFlags;
     int controlProtocolType;
     int audioQosType;
@@ -168,6 +175,8 @@ namespace stream {
     join(session_t &session);
     state_e
     state(session_t &session);
+
+    bool belongs_to_client(const session_t &session, const std::string &uuid);
 
     bool
     has_active_video_sessions();

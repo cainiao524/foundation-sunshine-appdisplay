@@ -3,9 +3,6 @@
 add_compile_definitions(SUNSHINE_PLATFORM="windows")
 
 enable_language(RC)
-set(CMAKE_RC_COMPILER windres)
-set(CMAKE_RC_FLAGS "${CMAKE_RC_FLAGS} --use-temp-file")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
 
 # gcc complains about misleading indentation in some mingw includes
 list(APPEND SUNSHINE_COMPILE_OPTIONS -Wno-misleading-indentation)
@@ -41,14 +38,6 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_G
     # Force using experimental coroutine ABI for compatibility
     add_definitions(-D_ALLOW_COROUTINE_ABI_MISMATCH)
 endif()
-
-# curl
-add_definitions(-DCURL_STATICLIB)
-include_directories(SYSTEM ${CURL_STATIC_INCLUDE_DIRS})
-link_directories(${CURL_STATIC_LIBRARY_DIRS})
-
-# miniupnpc
-add_definitions(-DMINIUPNP_STATICLIB)
 
 # extra tools/binaries for audio/display devices
 add_subdirectory(tools)  # todo - this is temporary, only tools for Windows are needed, for now
@@ -141,7 +130,7 @@ include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/include"
 
 # sunshine icon
 if(NOT DEFINED SUNSHINE_ICON_PATH)
-    set(SUNSHINE_ICON_PATH "${CMAKE_SOURCE_DIR}/sunshine.ico")
+    set(SUNSHINE_ICON_PATH "${CMAKE_SOURCE_DIR}/assets/brand/sunshine.ico")
 endif()
 
 configure_file("${CMAKE_SOURCE_DIR}/src/platform/windows/windows.rc.in" windows.rc @ONLY)
@@ -158,7 +147,6 @@ else()
 endif()
 
 set(PLATFORM_TARGET_FILES
-        "${CMAKE_CURRENT_BINARY_DIR}/windows.rc"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/publish.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/ftime_compat.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/misc.h"
@@ -201,6 +189,12 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_vram_internal.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_base.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_vram.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/pyrowave/cpu_encoder.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/pyrowave/cpu_encoder.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/pyrowave/gpu_encoder.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/pyrowave/gpu_encoder.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/pyrowave/transport.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/pyrowave/transport.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_ram.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_wgc.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_amd.cpp"
@@ -232,12 +226,7 @@ set(PLATFORM_TARGET_FILES
         ${NVENC_SOURCES}
         ${AMF_SOURCES})
 
-set(OPENSSL_LIBRARIES
-        libssl.a
-        libcrypto.a)
-
 list(PREPEND PLATFORM_LIBRARIES
-        ${CURL_STATIC_LIBRARIES}
         advapi32
         avrt
         crypt32

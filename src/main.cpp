@@ -199,8 +199,6 @@ int
 main(int argc, char *argv[]) {
   lifetime::argv = argv;
 
-  task_pool_util::TaskPool::task_id_t force_shutdown = nullptr;
-
 #ifdef _WIN32
   // Note: this only fires on a normal `return` from main. If the program
   // crashes mid-run (uncaught exception, AV, abort/terminate), atexit is
@@ -307,16 +305,7 @@ main(int argc, char *argv[]) {
 
 #ifdef WIN32
   // Modify relevant NVIDIA control panel settings if the system has corresponding gpu
-  if (nvprefs_instance.load()) {
-    // Restore global settings to the undo file left by improper termination of sunshine.exe
-    nvprefs_instance.restore_from_and_delete_undo_file_if_exists();
-    // Modify application settings for sunshine.exe
-    nvprefs_instance.modify_application_profile();
-    // Modify global settings, undo file is produced in the process to restore after improper termination
-    nvprefs_instance.modify_global_profile();
-    // Unload dynamic library to survive driver re-installation
-    nvprefs_instance.unload();
-  }
+  nvprefs_instance.configure();
 
   // Wait as long as possible to terminate Sunshine.exe during logoff/shutdown
   SetProcessShutdownParameters(0x100, SHUTDOWN_NORETRY);
@@ -397,29 +386,11 @@ main(int argc, char *argv[]) {
 
   // Create signal handler after logging has been initialized
   auto shutdown_event = mail::man->event<bool>(mail::shutdown);
-  on_signal(SIGINT, [&force_shutdown, shutdown_event]() {
-    BOOST_LOG(info) << "Interrupt handler called"sv;
-
-    auto task = []() {
-      BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
-      logging::log_flush();
-      lifetime::debug_trap();
-    };
-    force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
-
+  on_signal(SIGINT, [shutdown_event]() {
     shutdown_event->raise(true);
   });
 
-  on_signal(SIGTERM, [&force_shutdown, shutdown_event]() {
-    BOOST_LOG(info) << "Terminate handler called"sv;
-
-    auto task = []() {
-      BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
-      logging::log_flush();
-      lifetime::debug_trap();
-    };
-    force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
-
+  on_signal(SIGTERM, [shutdown_event]() {
     shutdown_event->raise(true);
   });
 
@@ -507,7 +478,7 @@ main(int argc, char *argv[]) {
     upnp_unmap = upnp::start();
   });
 
-  // FIXME: Temporary workaround: Simple-Web_server needs to be updated or replaced
+  // Do not start network services after shutdown has already been requested.
   if (shutdown_event->peek()) {
     return lifetime::desired_exit_code;
   }
@@ -595,6 +566,10 @@ main(int argc, char *argv[]) {
 
   mainThreadLoop(shutdown_event);
 
+  // Cover tray/HTTP requests and signals before any cleanup can block.
+  lifetime::start_shutdown_watchdog();
+  BOOST_LOG(info) << "Shutdown requested; allowing up to 10 seconds for cleanup"sv;
+
   client_fingerprint_deinit_guard.reset();
 
   // Stop outbound callbacks before joining inbound servers. This cancels
@@ -625,10 +600,7 @@ main(int argc, char *argv[]) {
 
 #ifdef WIN32
   // Restore global NVIDIA control panel settings
-  if (nvprefs_instance.owning_undo_file() && nvprefs_instance.load()) {
-    nvprefs_instance.restore_global_profile();
-    nvprefs_instance.unload();
-  }
+  nvprefs_instance.restore();
 #endif
 
 #ifdef _WIN32

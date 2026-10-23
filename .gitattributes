@@ -7,6 +7,7 @@ Dockerfile text eol=lf
 
 # i18n formatting checks compare locale files byte-for-byte with LF output
 src_assets/common/assets/web/public/assets/locale/*.json text eol=lf
+src_assets/common/assets/web/i18n/downloads/*.json text eol=lf
 
 # ensure Windows batch scripts are checked out with CRLF line endings
 *.bat text eol=crlf

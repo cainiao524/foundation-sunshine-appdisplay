@@ -3,6 +3,7 @@ param(
   [string]$Repository = 'AlkaidLab/foundation-sunshine',
   [string]$ReleaseTagPath = '.github/upstream-stable-release',
   [string]$ControlPanelSourcePath = 'src_assets/common/sunshine-control-panel/src-tauri/src/dualsense.rs',
+  [string]$ControlPanelCompatibilityPath = 'src_assets/common/sunshine-control-panel/src-tauri/component-compatibility.json',
   [string]$OutputPath = 'build/ds5-sidecar-package.json',
   [string]$ReleaseMetadataPath = '',
   [string]$ManifestSourcePath = ''
@@ -63,9 +64,11 @@ function Get-AssetSha256([object]$Asset) {
 }
 
 $releaseTagFile = Resolve-RepositoryPath $ReleaseTagPath 'Upstream release state file'
+$compatibilityFile = Resolve-RepositoryPath $ControlPanelCompatibilityPath 'Control Panel compatibility manifest'
 # The pinned control panel moved the DualSense sidecar constants from the
-# single dualsense.rs module into dualsense/mod.rs. Probe the new layout
-# first and fall back to the legacy file so both pins keep working.
+# single dualsense.rs module into dualsense/mod.rs. Probe the new layout first
+# and fall back to the legacy file so both pins keep working. Its component
+# version comes from component-compatibility.json through build.rs.
 $controlPanelSourceFile = Resolve-RepositoryPath $ControlPanelSourcePath 'Control Panel source file'
 if (-not (Test-Path -LiteralPath $controlPanelSourceFile -PathType Leaf)) {
   $moduleSource = Join-Path (Split-Path -Parent $controlPanelSourceFile) 'dualsense/mod.rs'
@@ -78,6 +81,9 @@ $outputFile = Resolve-RepositoryPath $OutputPath 'Manifest output path'
 if (-not (Test-Path -LiteralPath $releaseTagFile -PathType Leaf)) {
   throw "Upstream release state file is missing: $releaseTagFile"
 }
+if (-not (Test-Path -LiteralPath $compatibilityFile -PathType Leaf)) {
+  throw "Control Panel compatibility manifest is missing: $compatibilityFile"
+}
 if (-not (Test-Path -LiteralPath $controlPanelSourceFile -PathType Leaf)) {
   throw "Pinned Control Panel source is missing: $controlPanelSourceFile"
 }
@@ -88,7 +94,11 @@ if ([string]::IsNullOrWhiteSpace($releaseTag)) {
 }
 
 $controlPanelSource = [System.IO.File]::ReadAllText($controlPanelSourceFile, [System.Text.Encoding]::UTF8)
-$expectedComponentVersion = Read-RustStringConstant $controlPanelSource 'COMPONENT_VERSION'
+$compatibility = [System.IO.File]::ReadAllText($compatibilityFile, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+if ([uint32]$compatibility.schema -ne 1 -or [string]::IsNullOrWhiteSpace([string]$compatibility.component_version)) {
+  throw "Control Panel compatibility manifest has an invalid component version: $compatibilityFile"
+}
+$expectedComponentVersion = [string]$compatibility.component_version
 $expectedProtocol = Read-RustUIntConstant $controlPanelSource 'PROTOCOL_VERSION'
 $expectedAssetName = Read-RustStringConstant $controlPanelSource 'SIDECAR_PACKAGE_ASSET'
 $expectedTarget = Read-RustStringConstant $controlPanelSource 'SIDECAR_PACKAGE_TARGET'

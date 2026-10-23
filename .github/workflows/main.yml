@@ -112,7 +112,7 @@ jobs:
 
       - name: Setup Actions artifact build
         id: setup_build_auto
-        if: github.event_name != 'workflow_dispatch' && github.event_name != 'workflow_call'
+        if: github.event_name != 'workflow_dispatch' && inputs.publish-release != true && inputs.release-tag == ''
         shell: bash
         run: |
           VERSION="ci-${GITHUB_RUN_NUMBER}-${GITHUB_SHA:0:8}"
@@ -124,7 +124,7 @@ jobs:
 
       - name: Setup Release (Manual)
         id: setup_release_manual
-        if: github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call'
+        if: github.event_name == 'workflow_dispatch' || inputs.publish-release == true || inputs.release-tag != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PUBLISH_RELEASE: ${{ inputs['publish-release'] }}

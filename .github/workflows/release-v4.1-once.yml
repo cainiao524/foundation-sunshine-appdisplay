@@ -17,6 +17,6 @@ jobs:
       publish-release: true
       release-tag: v4.1
       release-name: Sunshine App Display Profile v4.1
-      source-ref: 4f0f2908d407b153a69ab9f130f6ce0e4d5fb70a
+      source-ref: release/v4.1
       prerelease: false
     secrets: inherit

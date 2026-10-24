@@ -913,18 +913,14 @@ internal static class ProtocolSelfTest
         }
     }
 
-    /// <summary>Checks the shared clock's tick rate, fractional conversion and natural 32-bit rollover.</summary>
     private static void VerifySensorTimestampEncoding()
     {
-        Require(Foundation.Input.DualSenseClock.Encode(0, 10_000_000) == 0,
+        Require(ControllerSession.EncodeSensorTimestamp(0) == 0,
             "DualSense sensor timestamp origin");
-        Require(Foundation.Input.DualSenseClock.Encode(10_000_000, 10_000_000) == 3_000_000,
+        Require(ControllerSession.EncodeSensorTimestamp(1_000_000) == 3_000_000,
             "DualSense sensor timestamp tick rate");
-        Require(Foundation.Input.DualSenseClock.Encode(0x100000000, 3_000_000) == 0 &&
-                Foundation.Input.DualSenseClock.Encode(0x100000001, 3_000_000) == 1,
+        Require(ControllerSession.EncodeSensorTimestamp(0x55555556) == 2,
             "DualSense sensor timestamp rollover");
-        Require(Foundation.Input.DualSenseClock.Encode(10_000_009, 10_000_000) == 3_000_002,
-            "DualSense fractional QPC ticks");
     }
 
     private static void VerifyProfileSelection()

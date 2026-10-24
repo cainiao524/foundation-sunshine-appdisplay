@@ -789,7 +789,7 @@ namespace abr {
 
 }  // namespace abr
 
-#ifdef SUNSHINE_ABR_TESTS
+#ifdef SUNSHINE_TESTS
   #include <gtest/gtest.h>
 
 namespace {

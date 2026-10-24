@@ -33,8 +33,7 @@ export const OFFICIAL_RESOURCES = [
 export const QUICK_START_RESOURCES = [
   {
     id: 'tutorial',
-    href: 'https://www.alkaidlab.com/docs/',
-    zhHref: 'https://www.alkaidlab.cn/docs/',
+    href: 'https://docs.qq.com/aio/DSGdQc3htbFJjSFdO',
     icon: 'fas fa-file-alt',
     titleKey: 'resource_card.tutorial',
     descriptionKey: 'resource_card.tutorial_desc',

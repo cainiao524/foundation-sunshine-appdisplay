@@ -184,7 +184,7 @@ internal sealed class DefaultAudioEndpointGuard : IDisposable
     }
 
     /// <summary>Treats endpoints disappearing during a lookup as absent and releases the lookup reference.</summary>
-    internal static bool TryGetDefaultEndpointId(
+    private static bool TryGetDefaultEndpointId(
         IMMDeviceEnumerator enumerator, EDataFlow flow, AudioRole role, out string endpointId)
     {
         endpointId = string.Empty;
@@ -211,8 +211,16 @@ internal sealed class DefaultAudioEndpointGuard : IDisposable
     }
 
     /// <summary>Resolves an MMDevice identity through its PnP ancestry instead of relying on its display name.</summary>
-    internal static bool IsVirtualDualSenseEndpoint(string endpointId) =>
-        IsVirtualDualSenseChain(GetEndpointChain(endpointId));
+    internal static bool IsVirtualDualSenseEndpoint(string endpointId)
+    {
+        var instanceId = endpointId.StartsWith("SWD\\MMDEVAPI\\", StringComparison.OrdinalIgnoreCase)
+            ? endpointId
+            : "SWD\\MMDEVAPI\\" + endpointId;
+        if (CM_Locate_DevNodeW(out var node, instanceId, 0) != 0)
+            return false;
+
+        return IsVirtualDualSenseDeviceNode(node);
+    }
 
     /// <summary>Filters the current render snapshot to HIDMaestro-backed DualSense endpoints.</summary>
     internal static IReadOnlyList<string> GetActiveVirtualDualSenseRenderEndpoints() =>
@@ -264,22 +272,6 @@ internal sealed class DefaultAudioEndpointGuard : IDisposable
     /// <summary>Bounds ancestry traversal and collects hardware identities for classification.</summary>
     private static bool IsVirtualDualSenseDeviceNode(uint node)
     {
-        return IsVirtualDualSenseChain(GetDeviceChain(node));
-    }
-
-    internal static string? GetEndpointControllerId(string endpointId) =>
-        GetEndpointChain(endpointId).FirstOrDefault(node => node.InstanceId.StartsWith(
-            @"USB\VID_054C&PID_0CE6\HM", StringComparison.OrdinalIgnoreCase)).InstanceId;
-
-    private static IReadOnlyList<DeviceNodeIdentity> GetEndpointChain(string endpointId)
-    {
-        var instanceId = endpointId.StartsWith(@"SWD\MMDEVAPI\", StringComparison.OrdinalIgnoreCase)
-            ? endpointId : @"SWD\MMDEVAPI\" + endpointId;
-        return CM_Locate_DevNodeW(out var node, instanceId, 0) == 0 ? GetDeviceChain(node) : Array.Empty<DeviceNodeIdentity>();
-    }
-
-    private static IReadOnlyList<DeviceNodeIdentity> GetDeviceChain(uint node)
-    {
         var chain = new List<DeviceNodeIdentity>();
         for (var depth = 0; depth < 12; ++depth)
         {
@@ -290,7 +282,7 @@ internal sealed class DefaultAudioEndpointGuard : IDisposable
             if (CM_Get_Parent(out node, node, 0) != 0)
                 break;
         }
-        return chain;
+        return IsVirtualDualSenseChain(chain);
     }
 
     /// <summary>Requires Sony identity plus a legacy owner marker or a synthetic serial under shared USB/IP.</summary>

@@ -14,14 +14,12 @@ set(BOOST_COMPONENTS
         asio
         beast
         filesystem
-        format
         function
         locale
         math
         log
         process
         program_options
-        property_tree
         system
         thread
 )

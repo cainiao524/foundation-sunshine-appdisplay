@@ -2,7 +2,7 @@
 
 ## 范围
 
-- v4.1 以 v4.0 为基线同步上游 master 至 `7a0995e2efb160ab70c075c85bc16a5dfed5df0a`；`.github/upstream-stable-release` 锁定 DualSense 组件使用的上游正式版。
+- v4.1 以 v4.0 为基线同步上游 master 至 `0219abe22c4d9c937a6ca52ebb895f216da4b077`；`.github/upstream-stable-release` 锁定 DualSense 组件使用的上游正式版。
 - 唯一定制能力为按应用配置显示方案；发布分支为 `release/v4.1`。上一发布分支为 `release/v4.0`，旧发布分支保存在 `archive/release-v3.0`。
 - 不新增跨设备接管、旧双显卡恢复增强或控制面板 Desktop 卡片。
 - 无应用方案时保持上游行为。驱动、采集、编码与显示恢复算法继续沿用上游。

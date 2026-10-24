@@ -1,6 +1,6 @@
 # Sunshine App Display Profile {{RELEASE_TAG}}
 
-以 v4.0 为基线同步上游 master 至 `7a0995e2efb160ab70c075c85bc16a5dfed5df0a`，保留按应用配置显示方案。DualSense 可选组件锁定上游正式版 `{{UPSTREAM_RELEASE}}`；控制面板、显示驱动、虚拟屏创建与恢复算法继续使用上游实现。
+以 v4.0 为基线同步上游 master 至 `0219abe22c4d9c937a6ca52ebb895f216da4b077`，保留按应用配置显示方案。DualSense 可选组件锁定上游正式版 `{{UPSTREAM_RELEASE}}`；控制面板、显示驱动、虚拟屏创建与恢复算法继续使用上游实现。
 
 ## 应用显示方案
 

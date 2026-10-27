@@ -19,7 +19,7 @@ test('app action notifications follow locale changes and translate failures', as
   context.mock.timers.enable({ apis: ['setTimeout'] })
   context.mock.method(console, 'error', () => {})
   context.mock.method(AppService, 'getApps', async () => [])
-  context.mock.method(AppService, 'saveApps', async () => true)
+  const saveApps = context.mock.method(AppService, 'saveApps', async () => true)
   const i18n = translator()
   const apps = useApps()
   apps.init(i18n.t)
@@ -28,7 +28,7 @@ test('app action notifications follow locale changes and translate failures', as
   i18n.locale.value = 'cs'
   await apps.handleSaveApp({ name: 'Test' })
   assert.equal(apps.message.value, cs.apps.feedback.save_success)
-  context.mock.method(AppService, 'saveApps', async () => { throw new Error('保存应用失败') })
+  saveApps.mock.mockImplementation(async () => { throw new Error('保存应用失败') })
   await apps.handleSaveApp({ name: 'Test' })
   assert.equal(apps.message.value, cs.apps.feedback.save_failed)
   assert.doesNotMatch(apps.message.value, /\p{Script=Han}/u)

@@ -26,6 +26,19 @@ TEST(AppDisplayProfile, FixedRefreshPreservesFraction) {
   EXPECT_EQ(profile->refresh_rate->denominator, 50);
 }
 
+TEST(AppDisplayProfile, TopologyCanReturnToInheritanceWithoutChangingOtherPolicies) {
+  auto node = app();
+  node.put("display-resolution", "2560x1440");
+  EXPECT_FALSE(app_display::parse(node)->topology);
+  node.put("display-device-prep", "ensure_only_display");
+  EXPECT_EQ(app_display::parse(node)->topology, display_device::parsed_config_t::device_prep_e::ensure_only_display);
+  node.put("display-device-prep", "");
+  const auto inherited = app_display::parse(node);
+  EXPECT_FALSE(inherited->topology);
+  ASSERT_TRUE(inherited->resolution);
+  EXPECT_EQ(inherited->resolution->width, 2560);
+}
+
 TEST(AppDisplayProfile, RejectsMalformedOrOutOfRangeModes) {
   for (const auto *value : {"1920x1080junk", "0x1080", "16385x1080", "1920X1080"}) {
     auto node = app();
@@ -63,12 +76,11 @@ TEST(AppDisplayProfile, DisconnectAndDynamicPoliciesAreOptional) {
   node.put("display-disconnect-action", "restore");
   node.put("display-dynamic-resolution-follow-display", "disabled");
   const auto profile = app_display::parse(node);
-  EXPECT_TRUE(app_display::restore_on_stop(profile, true));
+  EXPECT_TRUE(app_display::restore_on_disconnect(profile));
   EXPECT_FALSE(*profile->dynamic_follow_display);
-  EXPECT_FALSE(app_display::restore_on_stop(std::nullopt, true));
+  EXPECT_FALSE(app_display::restore_on_disconnect(std::nullopt));
   node.put("display-disconnect-action", "keep");
-  EXPECT_FALSE(app_display::restore_on_stop(app_display::parse(node), true));
-  EXPECT_TRUE(app_display::restore_on_stop(app_display::parse(node), false));
+  EXPECT_FALSE(app_display::restore_on_disconnect(app_display::parse(node)));
 }
 
 TEST(AppDisplayProfile, HdrRejectsIncompatibleSources) {

@@ -535,6 +535,9 @@ list(FILTER TEST_SOURCES EXCLUDE REGEX "test_nvprefs\\.cpp")
 # The touchscreen device test has a dedicated target that links the device
 # implementation; do not compile a second copy into the aggregate suite.
 list(FILTER TEST_SOURCES EXCLUDE REGEX "test_virtual_touchscreen_device\.cpp")
+# Profile parsing already runs in app_display_profile_unit_tests; retain the
+# integration tests here without compiling and running the parser tests twice.
+list(FILTER TEST_SOURCES EXCLUDE REGEX "test_app_display_profile\\.cpp$")
 
 set(ABR_TEST_STUB_SOURCE ${CMAKE_SOURCE_DIR}/tests/unit/abr_test_stubs.cpp)
 list(REMOVE_ITEM TEST_SOURCES ${ABR_TEST_STUB_SOURCE})

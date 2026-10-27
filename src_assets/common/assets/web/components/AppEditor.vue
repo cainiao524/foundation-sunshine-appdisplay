@@ -158,15 +158,17 @@
                   :displays="displayDevices"
                 />
 
-
-
                 <template v-if="hasForcedDisplayProfile">
                   <div v-if="formData['display-target'] === 'virtual' && formData['display-device-prep'] === 'ensure_only_display'" class="alert alert-warning display-profile-alert" role="alert">
                     <i class="fas fa-triangle-exclamation me-2"></i>
                     {{ t('apps.display_profile_exclusive_warning') }}
                   </div>
 
-                  <DisplayPreparationPicker v-model="formData['display-device-prep']" />
+                  <DisplayPreparationPicker
+                    v-model="formData['display-device-prep']"
+                    name="app_display_device_prep"
+                    :inherit-label="t('apps.display_profile_inherit')"
+                  />
 
                   <details class="display-options-note">
                     <summary>
@@ -204,7 +206,7 @@
                     </DisplayRuleRadioGroup>
                   </div>
 
-                  <!-- Advanced options: server-side fixed values (implementation notes in the UI) -->
+                  <!-- Fixed host display overrides -->
                   <details class="advanced-options-note">
                     <summary>
                       <i class="fas fa-flask" aria-hidden="true"></i>
@@ -559,7 +561,7 @@ const DEFAULT_FORM_DATA = Object.freeze({
   'image-path': '',
   'working-dir': '',
   'display-target': '',
-  'display-device-prep': 'ensure_active',
+  'display-device-prep': '',
   'display-resolution-mode': '',
   'display-refresh-rate-mode': '',
   'display-output-name': '',
@@ -620,12 +622,10 @@ const isNewApp = computed(() => !props.app || props.app.index === -1)
 // ---- App Display Profile (server-side per-app display scheme) ----
 const displayDevices = ref([])
 
-
 const loadDisplayDevices = async () => {
   try {
     const config = await apiJson('/api/config')
     displayDevices.value = Array.isArray(config.display_devices) ? config.display_devices : []
-
   } catch (_) {
     displayDevices.value = []
   }
@@ -674,10 +674,7 @@ const displayRuleValue = (mode) => {
 }
 const hasFixedResolution = computed(() => Boolean(formData.value?.['display-resolution']?.trim()))
 const hasFixedRefreshRate = computed(() => Boolean(formData.value?.['display-refresh-rate']?.trim()))
-// The fixed-values switch is a real control: it owns the enabled state and
-// the inputs are disabled while it is off. It initializes from existing
-// values, turns itself on when a value is typed, and clears both values
-// when turned off.
+// Initialize from the app's saved values; turning this off clears both overrides.
 const fixedValuesEnabled = ref(false)
 watch(fixedValuesEnabled, (enabled) => {
   if (!enabled) {
@@ -685,35 +682,15 @@ watch(fixedValuesEnabled, (enabled) => {
     formData.value['display-refresh-rate'] = ''
   }
 })
-watch(
-  () => [formData.value?.['display-resolution'], formData.value?.['display-refresh-rate']],
-  ([resolution, refreshRate]) => {
-    if (resolution?.trim() || refreshRate?.trim()) {
-      fixedValuesEnabled.value = true
-    }
-  }
-)
 const appResolutionRule = computed({
-  get: () => {
-    if (hasFixedResolution.value) return 'follow_client'
-    return displayRuleModes[formData.value?.['display-resolution-mode']] || 'inherit'
-  },
+  get: () => displayRuleModes[formData.value?.['display-resolution-mode']] || 'inherit',
   set: (mode) => {
-    if (mode !== 'follow_client') {
-      formData.value['display-resolution'] = ''
-    }
     formData.value['display-resolution-mode'] = displayRuleValue(mode)
   },
 })
 const appRefreshRateRule = computed({
-  get: () => {
-    if (hasFixedRefreshRate.value) return 'follow_client'
-    return displayRuleModes[formData.value?.['display-refresh-rate-mode']] || 'inherit'
-  },
+  get: () => displayRuleModes[formData.value?.['display-refresh-rate-mode']] || 'inherit',
   set: (mode) => {
-    if (mode !== 'follow_client') {
-      formData.value['display-refresh-rate'] = ''
-    }
     formData.value['display-refresh-rate-mode'] = displayRuleValue(mode)
   },
 })
@@ -725,12 +702,18 @@ const displayProfileValid = computed(() => {
 })
 
 const resHintText = computed(() => {
+  if (hasFixedResolution.value) {
+    return t('apps.display_profile_fixed_override_hint', { value: formData.value['display-resolution'] })
+  }
   const rule = appResolutionRule.value
   if (rule === 'no_operation') return t('apps.display_profile_resolution_ignore_hint')
   if (rule === 'follow_client') return t('apps.display_profile_resolution_follow_hint')
   return ''
 })
 const rrHintText = computed(() => {
+  if (hasFixedRefreshRate.value) {
+    return t('apps.display_profile_fixed_override_hint', { value: `${formData.value['display-refresh-rate']} Hz` })
+  }
   const rule = appRefreshRateRule.value
   if (rule === 'follow_client') return t('apps.display_profile_refresh_rate_follow_hint')
   return ''
@@ -738,11 +721,11 @@ const rrHintText = computed(() => {
 // ---- end App Display Profile ----
 
 const isFormValid = computed(() => {
-  // name 瀛楁鏄繀濉殑锛屽繀椤婚獙璇侀€氳繃
+  // name 字段是必填的，必须验证通过
   const nameValid = validation.value.name?.isValid === true
   
-  // cmd 瀛楁涓嶆槸蹇呭～鐨勶紝濡傛灉宸查獙璇佸垯浣跨敤楠岃瘉缁撴灉锛屽鏋滄湭楠岃瘉鎴栦负绌哄垯璁や负鏈夋晥
-  const cmdValid = validation.value.cmd?.isValid !== false  // undefined 鎴?true 閮借涓烘湁鏁?
+  // cmd 字段不是必填的，如果已验证则使用验证结果，如果未验证或为空则认为有效
+  const cmdValid = validation.value.cmd?.isValid !== false  // undefined 或 true 都认为有效
   
   return nameValid && cmdValid && displayProfileValid.value
 })
@@ -834,15 +817,15 @@ const initializeForm = (app) => {
   )
   validation.value = {}
   imageError.value = ''
-  // 绔嬪嵆楠岃瘉鎵€鏈夊瓧娈碉紝纭繚琛ㄥ崟鐘舵€佹纭?
+  // 立即验证所有字段，确保表单状态正确
   nextTick(() => {
-    // 楠岃瘉蹇呭～瀛楁 name锛堟€绘槸楠岃瘉锛?
+    // 验证必填字段 name（总是验证）
     validateField('name')
-    // 楠岃瘉 cmd 瀛楁锛堝鏋滄湁鍊煎垯楠岃瘉锛屾病鏈夊€煎垯鏍囪涓烘湁鏁堬級
+    // 验证 cmd 字段（如果有值则验证，没有值则标记为有效）
     if (formData.value.cmd && formData.value.cmd.trim()) {
       validateField('cmd')
     } else {
-      // cmd 瀛楁涓嶆槸蹇呭～鐨勶紝濡傛灉涓虹┖鍒欐爣璁颁负鏈夋晥
+      // cmd 字段不是必填的，如果为空则标记为有效
       validation.value.cmd = { isValid: true, message: '' }
     }
   })
@@ -878,9 +861,9 @@ const validateField = (fieldName) => {
   return result
 }
 
-// 澶勭悊 cmd 瀛楁杈撳叆锛屽鏋滄竻绌哄垯绔嬪嵆鏇存柊楠岃瘉鐘舵€?
+// 处理 cmd 字段输入，如果清空则立即更新验证状态
 const handleCmdInput = () => {
-  // 濡傛灉 cmd 瀛楁琚竻绌猴紝绔嬪嵆鏍囪涓烘湁鏁堬紙鍥犱负涓嶆槸蹇呭～瀛楁锛?
+  // 如果 cmd 字段被清空，立即标记为有效（因为不是必填字段）
   if (!formData.value.cmd || !formData.value.cmd.trim()) {
     validation.value.cmd = { isValid: true, message: '' }
   }
@@ -1040,7 +1023,7 @@ onBeforeUnmount(cleanup)
   max-height: calc(100vh - 200px);
   overflow-y: auto;
 
-  /* 婊氬姩鏉＄編鍖?*/
+  /* 滚动条美化 */
   &::-webkit-scrollbar {
     width: 6px;
   }

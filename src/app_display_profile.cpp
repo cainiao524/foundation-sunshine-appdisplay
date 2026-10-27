@@ -95,7 +95,7 @@ namespace app_display {
            !(profile.hdr == hdr_e::off && stream_hdr && !synthetic_hdr);
   }
 
-  bool restore_on_stop(const std::optional<profile_t> &profile, bool app_running) {
-    return !app_running || (profile && profile->restore_on_disconnect.value_or(false));
+  bool restore_on_disconnect(const std::optional<profile_t> &profile) {
+    return profile && profile->restore_on_disconnect.value_or(false);
   }
 }  // namespace app_display

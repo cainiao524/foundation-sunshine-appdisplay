@@ -24,9 +24,8 @@ export function validDisplayRefreshRate(value) {
  *
  * Apps without a display target keep no display fields at all, so the client
  * request and the global configuration stay fully in control. Apps with a
- * target only keep valid values; fixed resolution / refresh rate values are
- * dropped unless the matching mode can apply them, and the fixed HDR state
- * must be one of the supported values.
+ * target only keep valid values. Fixed resolution / refresh rate override
+ * the matching mode without discarding it; HDR must be a supported policy.
  */
 export function normalizeAppDisplayProfile(app) {
   const normalized = { ...app }

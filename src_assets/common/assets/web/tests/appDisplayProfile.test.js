@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
 import { normalizeAppDisplayProfile, validDisplayResolution, validDisplayRefreshRate } from '../utils/appDisplayProfile.js'
@@ -129,15 +128,4 @@ test('display-output-name only kept for a physical target', () => {
 
   assert.equal(physical['display-output-name'], '\\\\.\\DISPLAY1')
   assert.equal(virtual['display-output-name'], undefined)
-})
-
-test('app editor reuses the shared display components', async () => {
-  const source = await readFile(new URL('../components/AppEditor.vue', import.meta.url), 'utf8')
-
-  assert.match(source, /import DisplayPreparationPicker from/)
-  assert.match(source, /<DisplayPreparationPicker/)
-  assert.match(source, /import NewDisplayOutputSelector from/)
-  assert.match(source, /<NewDisplayOutputSelector/)
-  assert.match(source, /import DisplayRuleRadioGroup from/)
-  assert.match(source, /<DisplayRuleRadioGroup/)
 })

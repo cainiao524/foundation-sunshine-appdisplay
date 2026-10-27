@@ -4279,7 +4279,7 @@ namespace stream {
             system_tray::update_tray_pausing(proc::proc.get_last_run_app_name());
 #endif
 
-            restore_display_state = app_display::restore_on_stop(session.app_display_profile, true);
+            restore_display_state = app_display::restore_on_disconnect(session.app_display_profile);
           }
           else {
             tray_state::set_idle(proc::proc.get_last_run_app_name());

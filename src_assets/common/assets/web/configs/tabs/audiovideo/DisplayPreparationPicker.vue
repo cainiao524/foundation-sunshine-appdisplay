@@ -1,19 +1,23 @@
 <script setup>
+import { computed } from 'vue'
 import { $tp } from '../../../platform-i18n'
 
-defineProps({
+const props = defineProps({
   modelValue: String,
+  name: { type: String, default: 'display_device_prep' },
+  inheritLabel: { type: String, default: '' },
 })
 
 const emit = defineEmits(['update:modelValue'])
 
-const modes = [
+const modes = computed(() => [
+  ...(props.inheritLabel ? [''] : []),
   'no_operation',
   'ensure_active',
   'ensure_primary',
   'ensure_secondary',
   'ensure_only_display',
-]
+])
 </script>
 
 <template>
@@ -31,7 +35,7 @@ const modes = [
         <input
           class="visually-hidden"
           type="radio"
-          name="display_device_prep"
+          :name="name"
           :value="mode"
           :checked="modelValue === mode"
           @change="emit('update:modelValue', mode)"
@@ -52,9 +56,9 @@ const modes = [
           </div>
           <div class="display-prep-copy">
             <span class="display-prep-title">
-              {{ $tp('config.display_device_prep_' + mode) }}
+              {{ mode ? $tp('config.display_device_prep_' + mode) : inheritLabel }}
             </span>
-            <span class="display-prep-description">
+            <span v-if="mode" class="display-prep-description">
               {{ $tp('config.display_device_prep_' + mode + '_desc') }}
             </span>
           </div>

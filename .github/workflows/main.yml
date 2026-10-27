@@ -1,7 +1,7 @@
 name: Build and Release
 
-# Pull requests and pushes only build Actions artifacts. A formal release can
-# only be requested through workflow_dispatch after all validation succeeds.
+# Pull requests and pushes only build Actions artifacts. Formal releases require
+# an explicit workflow_dispatch or workflow_call request and successful validation.
 on:
   pull_request:
     branches:
@@ -69,10 +69,6 @@ on:
         required: false
         default: false
         type: boolean
-      gui_run_id:
-        description: 'Optional successful Panel artifact run; its commit must match the Panel submodule'
-        type: string
-        default: ''
       rtx_hdr:
         description: 'RTX HDR support for development branches (official master always requires ON)'
         type: choice
@@ -174,7 +170,6 @@ jobs:
     needs: setup_release
     permissions:
       contents: read
-      actions: write  # prune stale ccache entries after saving this run's
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -198,6 +193,7 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+      actions: write  # prune stale compiler caches for this branch
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -354,28 +350,11 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ github.workspace }}\.ccache
-          # The key is unique per run; the prefix restore-key is what actually
-          # produces the hits: every run seeds itself from the most recent
-          # previous one. Saving is split out below so that only master
-          # writes: PR-branch entries are invisible to other branches yet
-          # still consume the shared cache quota, and when that quota fills
-          # (10 GB, LRU), eviction wiped the whole lineage once and forced a
-          # full 47-minute cold rebuild.
+          # Restore the newest visible entry. Only master and release branches
+          # save, retaining one entry per branch to limit cache quota use.
           key: ccache-windows-${{ github.run_id }}
           restore-keys: |
             ccache-windows-
-
-      - name: Fetch paired GUI artifact
-        if: github.event_name == 'workflow_dispatch' && inputs.gui_run_id != ''
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GUI_RUN_ID: ${{ inputs.gui_run_id }}
-        run: |
-          $arguments = @{ Destination = "$env:RUNNER_TEMP/paired-gui" }
-          if ($env:GUI_RUN_ID) { $arguments.RunId = $env:GUI_RUN_ID }
-          ./scripts/fetch-paired-gui.ps1 @arguments
-          "GUI_BUNDLE_DIR=$env:RUNNER_TEMP/paired-gui" >> $env:GITHUB_ENV
 
       - name: Configure Windows
         id: configure_windows
@@ -406,15 +385,10 @@ jobs:
         run: |
           mkdir -p build
           ccache --zero-stats
-          gui_options=()
-          if [[ -n "${GUI_BUNDLE_DIR:-}" ]]; then
-            gui_options=(-DFETCH_GUI=OFF "-DGUI_DIR=$GUI_BUNDLE_DIR")
-          fi
           cmake \
             -B build \
             -G Ninja \
             -S . \
-            "${gui_options[@]}" \
             -DBUILD_DOCS=OFF \
             -DSUNSHINE_RTX_HDR="$SUNSHINE_RTX_HDR" \
             -DBUILD_TESTS=ON \
@@ -436,6 +410,7 @@ jobs:
           fi
 
       - name: Build Windows
+        id: build_windows
         shell: msys2 {0}
         env:
           CCACHE_DIR: ${{ github.workspace }}\.ccache
@@ -445,23 +420,14 @@ jobs:
           ninja -C build
           ccache --show-stats
 
-      - name: Save compiler objects
-        if: success()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ github.workspace }}\.ccache
-          key: ccache-windows-${{ github.run_id }}
-
       - name: Run native tests
         shell: msys2 {0}
         run: ctest --test-dir build --output-on-failure --no-tests=error
 
       - name: Save compiler cache
-        # Only master writes (always(): a failed or cancelled build still
-        # produced valid objects). PR runs restore master's entry, so they
-        # don't need to save, and skipping their saves keeps the shared
-        # cache quota flat.
-        if: always() && github.ref == 'refs/heads/master'
+        # Save only after a completed build, even if subsequent tests fail.
+        # PRs restore existing entries without consuming quota on hidden refs.
+        if: ${{ !cancelled() && steps.build_windows.outcome == 'success' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/release/')) }}
         id: ccache_save
         continue-on-error: true
         uses: actions/cache/save@v6
@@ -470,30 +436,22 @@ jobs:
           key: ccache-windows-${{ github.run_id }}
 
       - name: Prune stale compiler cache entries
-        # Collapse the cache to exactly one entry (the newest one saved).
-        # Entries pile up one-per-run otherwise; on a 10 GB repo quota that
-        # once got the entire lineage LRU-evicted. A single entry is also
-        # restored by every later run, which keeps resetting its 7-day
-        # inactivity clock, so neither eviction path can take it out.
-        # Only entries from runs OLDER than this one are deleted (run ids
-        # increase monotonically): a cancelled run still executes its
-        # always() save and prune alongside the next run, and age-filtered
-        # prunes converge to the newest entry under any interleaving —
-        # pruning by "not my key" instead could race down to zero entries.
-        # Skipped unless the save step actually succeeded (outcome keeps the
-        # real result under continue-on-error; the save subaction sets no
-        # outputs, so conclusion can't tell success from failure).
-        if: always() && github.ref == 'refs/heads/master' && steps.ccache_save.outcome == 'success'
+        # Delete only older entries on this ref, preserving the newest cache
+        # and caches belonging to other branches during concurrent runs.
+        if: ${{ !cancelled() && steps.ccache_save.outcome == 'success' }}
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+          CACHE_REF: ${{ github.ref }}
         shell: pwsh
         run: |
           $current = "ccache-windows-${{ github.run_id }}"
+          $cacheRef = [Uri]::EscapeDataString($env:CACHE_REF)
           # Page through the caches API instead of `gh cache list`: the
           # latter caps at --limit 100, and once this repo's other caches
           # (msys2, npm, ...) grow past that, stale ccache entries would
           # fall outside the window and never get pruned.
-          $stale = gh api --paginate "repos/$env:GITHUB_REPOSITORY/actions/caches?per_page=100" --jq '.actions_caches[] | select(.key | test("^ccache-windows-[0-9]+$")) | [(.key | sub("^ccache-windows-";"") | tonumber), .id, .key] | @tsv' |
+          $stale = gh api --paginate "repos/$env:GITHUB_REPOSITORY/actions/caches?per_page=100&ref=$cacheRef" --jq '.actions_caches[] | select(.key | test("^ccache-windows-[0-9]+$")) | [(.key | sub("^ccache-windows-";"") | tonumber), .id, .key] | @tsv' |
             Where-Object { $_ } |
             ForEach-Object {
               $parts = $_ -split "`t"

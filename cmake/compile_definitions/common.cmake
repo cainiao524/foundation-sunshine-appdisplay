@@ -50,7 +50,6 @@ endif()
 
 configure_file("${CMAKE_SOURCE_DIR}/src/version.h.in" version.h @ONLY)
 
-
 if(NOT SUNSHINE_ASSETS_DIR_DEF)
     set(SUNSHINE_ASSETS_DIR_DEF "${SUNSHINE_ASSETS_DIR}")
 endif()

@@ -5,6 +5,8 @@
 - 原生检查：全新 CMake 构建目录启用 `BUILD_TESTS=ON`，构建后 `ctest --test-dir build --output-on-failure --no-tests=error`。
 - 工作流检查：`actionlint .github/workflows/main.yml`。
 - 正式发布手动触发 `main.yml`，使用发布分支或已验证提交；填写 `publish-release=true`、版本标签、名称和 `prerelease=false`。
+- 控制面板和触控笔插件统一从锁定子模块源码构建；工作流不再接受单独的 GUI 产物下载入口。
+- 编译缓存仅由 `master` 与 `release/*` 分支在编译成功后保存，并清理同一分支的旧缓存；PR 仅恢复缓存。
 - 不预先推送发布标签；完整构建、测试与上传产物成功后，工作流创建附注标签并发布。
 - 准备任务把引用解析为精确提交；虚拟显示器辅助测试通过后才运行 Windows 构建及发布。
 - Inno Setup 暂继续固定 6.7.3，校验官方 GitHub 资产摘要，不引入未经验证的镜像。

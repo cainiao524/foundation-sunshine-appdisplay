@@ -1,19 +1,16 @@
-# Optional Windows GUI package pairing
+# Windows GUI package pairing
 
-Normal Windows builds, including pushes and manual builds on `master`, download
-the latest available Control Panel release bundle through `FetchGUI.cmake`.
-They do not require a GUI artifact matching the Panel submodule commit.
-
-For an explicit paired development test, supply `gui_run_id` when dispatching
-`main.yml`. Only this opt-in path uses `scripts/fetch-paired-gui.ps1`: the run
-must be a successful Panel `build.yml` run at the committed
-`src_assets/common/sunshine-control-panel` gitlink and contain a non-expired
-`sunshine-gui-windows-x64` artifact. It keeps the GUI executable and native
-plugin together and writes `paired-build.json` with the repository, run and
-commit used. This overrides the release download for that run only.
+The downstream `main.yml` builds and tests the Control Panel at the committed
+`src_assets/common/sunshine-control-panel` gitlink, including its native stylus
+plugin. Packaging uses those local binaries and checks the packaged GUI against
+the build output. There is no alternate artifact-download input in this workflow.
 
 For local paired staging, run `scripts/fetch-paired-gui.ps1 -Destination <fresh-path>`
 from the Sunshine checkout. Omit `RunId` to discover a matching build, or pass
 `-RunId <id>` to validate a specific build. Configure with `FETCH_GUI=OFF` and
-`GUI_DIR=<fresh-path>` to use the verified bundle. GitHub artifact access requires
-an authenticated `gh` session or an appropriate `GH_TOKEN`.
+`GUI_DIR=<fresh-path>` and `SUNSHINE_PREFER_LOCAL_GUI=OFF` to use the verified
+bundle without a local build taking precedence. The script requires a successful
+Panel `build.yml` run matching the gitlink and a non-expired
+`sunshine-gui-windows-x64` artifact; it records provenance in `paired-build.json`.
+GitHub artifact access requires an authenticated `gh` session or an appropriate
+`GH_TOKEN`.

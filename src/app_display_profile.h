@@ -30,5 +30,6 @@ namespace app_display {
   // An absent target disables the entire scheme. Invalid enabled schemes throw.
   std::optional<profile_t> parse(const boost::property_tree::ptree &app);
   bool hdr_compatible(const profile_t &profile, bool stream_hdr, bool synthetic_hdr);
-  bool restore_on_stop(const std::optional<profile_t> &profile, bool app_running);
+  // Called when the last video session disconnects while the app is still running.
+  bool restore_on_disconnect(const std::optional<profile_t> &profile);
 }  // namespace app_display

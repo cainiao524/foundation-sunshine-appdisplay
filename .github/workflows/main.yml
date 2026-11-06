@@ -1,7 +1,7 @@
 name: Build and Release
 
-# Pull requests and pushes only build Actions artifacts. Formal releases require
-# an explicit workflow_dispatch or workflow_call request and successful validation.
+# Pull requests and pushes build artifacts. Manual releases and the upstream
+# scheduler use the same tests, draft publication and asset verification gates.
 on:
   pull_request:
     branches:
@@ -53,7 +53,7 @@ on:
         default: false
         type: boolean
       release-tag:
-        description: '新发布使用的标签；禁止与现有标签重复'
+        description: '发布标签；已有标签仅允许同提交恢复未完成发布'
         required: false
         type: string
       release-name:
@@ -82,11 +82,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: '${{ github.workflow }}-${{ github.ref }}'
-  cancel-in-progress: true
+  # A reusable workflow shares github.workflow with its caller. Keep this group
+  # distinct from the scheduler and never interrupt publication halfway through.
+  group: 'sunshine-build-${{ github.repository }}-${{ inputs.release-tag || github.ref }}'
+  cancel-in-progress: false
 
-# The pinned LizardByte release action still composes a Node.js 20 action.
-# Run it on Node.js 24 ahead of GitHub's fall 2026 Node.js 20 removal.
+# Keep any remaining JavaScript actions on the supported Node.js runtime.
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
@@ -105,6 +106,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source-ref || github.sha }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Test release automation
+        run: |
+          if [ ! -f scripts/publish_release.py ] || [ ! -d scripts/tests ]; then
+            echo '::error::This workflow requires source-ref to include the release automation scripts. Build historical sources using the workflow on their original release branch.'
+            exit 1
+          fi
+          python -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
       - name: Setup Actions artifact build
         id: setup_build_auto
@@ -150,14 +165,8 @@ jobs:
               echo '::error::正式发布必须显式填写 release-tag。'
               exit 1
             fi
-            if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
-              echo "::error::标签 ${TAG} 已存在，禁止覆盖。"
-              exit 1
-            fi
-            if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" >/dev/null 2>&1; then
-              echo "::error::发布 ${TAG} 已存在，禁止覆盖。"
-              exit 1
-            fi
+            python scripts/publish_release.py --check-only \
+              --repository "$GITHUB_REPOSITORY" --tag "$TAG" --commit "$SOURCE_REF"
           fi
           echo "publish_release=${PUBLISH_RELEASE}" >> $GITHUB_OUTPUT
           echo "release_commit=${SOURCE_REF}" >> $GITHUB_OUTPUT
@@ -297,6 +306,17 @@ jobs:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: package-lock.json
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Test release metadata
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          ./scripts/test-generate-app-display-release-notes.ps1
+          cmake -P scripts/test-release-build-version.cmake
 
       - name: Setup Rust for pinned Control Panel
         uses: dtolnay/rust-toolchain@stable
@@ -712,32 +732,24 @@ jobs:
             artifacts/checksums.json
           if-no-files-found: error
 
-      - name: Create annotated release tag
+      - name: Publish and verify release (resume incomplete draft)
         if: needs.setup_release.outputs.publish_release == 'true'
-        shell: bash
+        shell: pwsh
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.setup_release.outputs.release_tag }}
           RELEASE_COMMIT: ${{ needs.setup_release.outputs.release_commit }}
+          RELEASE_NAME: ${{ needs.setup_release.outputs.release_name }}
+          RELEASE_PRERELEASE: ${{ needs.setup_release.outputs.release_prerelease }}
         run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
-          git check-ref-format "refs/tags/$RELEASE_TAG"
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git tag -a "$RELEASE_TAG" "$RELEASE_COMMIT" -m "Release $RELEASE_TAG"
-          git push origin "refs/tags/$RELEASE_TAG"
-
-      - name: Create GitHub Release
-        if: needs.setup_release.outputs.publish_release == 'true'
-        uses: ncipollo/release-action@v1.14.0
-        with:
-          allowUpdates: false
-          artifactErrorsFailBuild: true
-          artifacts: "artifacts/*"
-          bodyFile: release-notes.md
-          commit: ${{ needs.setup_release.outputs.release_commit }}
-          generateReleaseNotes: true
-          name: ${{ needs.setup_release.outputs.release_name }}
-          prerelease: ${{ needs.setup_release.outputs.release_prerelease == 'true' }}
-          tag: ${{ needs.setup_release.outputs.release_tag }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ((git rev-parse HEAD).Trim() -ne $env:RELEASE_COMMIT) {
+            throw 'Checkout changed after validation; refusing to publish a different source commit.'
+          }
+          $publishArgs = @(
+            'scripts/publish_release.py', '--repository', $env:GITHUB_REPOSITORY,
+            '--tag', $env:RELEASE_TAG, '--commit', $env:RELEASE_COMMIT,
+            '--name', $env:RELEASE_NAME, '--artifacts', 'artifacts', '--notes', 'release-notes.md'
+          )
+          if ($env:RELEASE_PRERELEASE -eq 'true') { $publishArgs += '--prerelease' }
+          python @publishArgs

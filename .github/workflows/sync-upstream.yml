@@ -1,0 +1,106 @@
+name: Sync upstream stable
+
+on:
+  schedule:
+    # 02:17, 08:17, 14:17, 20:17 Asia/Taipei (GitHub scheduling may be delayed).
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      check-only:
+        description: 'Only inspect upstream and pending state; do not create branches or releases'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-stable-sync
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.repository == 'cainiao524/foundation-sunshine-appdisplay' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
+      needs_build: ${{ steps.sync.outputs.needs_build }}
+      source_sha: ${{ steps.sync.outputs.source_sha }}
+      base_sha: ${{ steps.sync.outputs.base_sha }}
+      version: ${{ steps.sync.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Test synchronization and publication guards
+        run: python -m unittest discover -s scripts/tests -p 'test_*.py' -v
+      - name: Detect and prepare upstream stable
+        id: sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_ONLY: ${{ inputs.check-only }}
+        shell: bash
+        run: |
+          args=()
+          if [ "$CHECK_ONLY" = 'true' ]; then args+=(--check-only); fi
+          python scripts/upstream_sync.py prepare "${args[@]}"
+
+  release:
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true' && needs.prepare.outputs.needs_build == 'true'
+    permissions:
+      contents: write
+      actions: write
+    uses: ./.github/workflows/main.yml
+    with:
+      build-version: ${{ needs.prepare.outputs.version }}
+      release-tag: ${{ needs.prepare.outputs.version }}
+      release-name: Sunshine App Display Profile ${{ needs.prepare.outputs.version }}
+      source-ref: ${{ needs.prepare.outputs.source_sha }}
+      publish-release: true
+      prerelease: false
+
+  finalize:
+    needs: [prepare, release]
+    if: >-
+      always() && !cancelled() && needs.prepare.result == 'success' &&
+      needs.prepare.outputs.changed == 'true' &&
+      (needs.release.result == 'success' ||
+       (needs.release.result == 'skipped' && needs.prepare.outputs.needs_build == 'false'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Verify publication and advance maintenance branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: >-
+          python scripts/upstream_sync.py finalize
+          --source-sha "$SOURCE_SHA" --base-sha "$BASE_SHA" --version "$VERSION"
+
+  report:
+    needs: [prepare, release, finalize]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record actionable failure
+        run: |
+          echo '## Upstream synchronization stopped' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Inspect the failed job above. Existing releases and the maintenance branch are retained. Merge conflicts need manual resolution; transient build/upload failures can be retried with Run workflow or Re-run failed jobs.' >> "$GITHUB_STEP_SUMMARY"
+          exit 1

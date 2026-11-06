@@ -10,6 +10,8 @@ param(
 
   [string]$UpstreamReleasePath = '.github/upstream-stable-release',
 
+  [string]$UpstreamCommitPath = '.github/upstream-stable-commit',
+
   [string]$OutputPath = 'release-notes.md'
 )
 
@@ -30,6 +32,21 @@ $upstreamRelease = [System.IO.File]::ReadAllText(
 ).Trim()
 if ([string]::IsNullOrWhiteSpace($upstreamRelease)) {
   throw "Upstream release state is empty: $UpstreamReleasePath"
+}
+
+if (-not (Test-Path -LiteralPath $UpstreamCommitPath -PathType Leaf)) {
+  throw "Upstream commit state not found: $UpstreamCommitPath"
+}
+$upstreamCommit = [System.IO.File]::ReadAllText(
+  [System.IO.Path]::GetFullPath($UpstreamCommitPath),
+  [System.Text.Encoding]::UTF8
+).Trim()
+if ($upstreamCommit -notmatch '\A[0-9a-fA-F]{40}\z') {
+  throw "Upstream commit state must contain a full Git commit SHA: $UpstreamCommitPath"
+}
+$upstreamCommit = $upstreamCommit.ToLowerInvariant()
+if ($ReleaseCommit -notmatch '\A[0-9a-fA-F]{40}\z') {
+  throw 'ReleaseCommit must be a full Git commit SHA.'
 }
 
 $parsedChecksumEntries = [System.IO.File]::ReadAllText(
@@ -63,6 +80,8 @@ $content = [System.IO.File]::ReadAllText($templatePath, [System.Text.Encoding]::
 $replacements = [ordered]@{
   '{{RELEASE_TAG}}' = $ReleaseTag
   '{{UPSTREAM_RELEASE}}' = $upstreamRelease
+  '{{UPSTREAM_COMMIT}}' = $upstreamCommit
+  '{{UPSTREAM_RELEASE_URL}}' = 'https://github.com/AlkaidLab/foundation-sunshine/releases/tag/' + [System.Uri]::EscapeDataString($upstreamRelease)
   '{{INSTALLER_FILE}}' = [string]($installer[0].File)
   '{{PORTABLE_FILE}}' = [string]($portable[0].File)
   '{{CHECKSUM_LINES}}' = ($checksumLines -join "`n")

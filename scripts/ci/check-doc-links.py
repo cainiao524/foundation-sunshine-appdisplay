@@ -39,6 +39,10 @@ def targets(text):
 
 
 def is_local(target):
+    # Mustache-style placeholders in release-note templates are filled in later;
+    # they are not repository-relative paths.
+    if "{{" in target:
+        return False
     return not (target.startswith(("#", "mailto:", "tel:", "data:")) or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", target) or target.startswith("//"))
 
 

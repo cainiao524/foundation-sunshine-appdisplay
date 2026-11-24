@@ -5,12 +5,16 @@
 #include "confighttp.h"
 #include "ai/http_stream.h"
 #include "config.h"
+#include "confighttp/local_auth_token.h"
 #include "confighttp/routes.h"
 #include "confighttp/types.h"
 #include "globals.h"
 #include "image_enhancement/api.h"
+#include "file_handler.h"
 #include "logging.h"
 #include "network.h"
+#include "sparxie/runtime.h"
+#include "src/confighttp/web_install.h"
 #include <atomic>
 #include <latch>
 #include <optional>
@@ -23,18 +27,35 @@ namespace confighttp {
   start() {
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
 
+    // An update that was stopped between moving the Web UI folder aside and finishing leaves the
+    // old folder beside the live one; use it when the live one is not complete.
+    if (confighttp::web_install::recover_previous(file_handler::path_from_utf8(WEB_DIR))) {
+      BOOST_LOG(warning) << "The Web UI folder was missing; the one an interrupted update left aside was put back"sv;
+    }
+    else if (!confighttp::web_install::is_complete(file_handler::path_from_utf8(WEB_DIR))) {
+      BOOST_LOG(error) << "The Web UI folder is missing or incomplete: this installation needs a repair (run the installer again)"sv;
+    }
+
+    if (!local_auth_token::initialize()) {
+      BOOST_LOG(error) << "Local Web UI credential initialization failed; local API requests will require another credential";
+    }
+    else {
+      local_auth_token::start_monitor();
+    }
+
     auto port_https = net::map_port(PORT_HTTPS);
     auto address_family = net::af_from_enum_string(config::sunshine.address_family);
 
     https_server_t server { config::nvhttp.cert, config::nvhttp.pkey };
     register_routes(server);
+    ::sparxie::note_host_started();
     server.config.reuse_address = true;
     server.config.address = net::get_bind_address(address_family);
     server.config.port = port_https;
-    // Use a small thread pool so that a slow request handler (proxy upstream,
-    // file upload, etc.) doesn't block other web UI requests on the same
-    // single-threaded io_service.
-    server.config.thread_pool_size = 2;
+    // A health check asks for several groups at once, and each handler blocks until
+    // that group's probe budget. Two threads let one encoder probe stall every other
+    // page. Eight keeps a slow probe from taking the whole UI without a large pool.
+    server.config.thread_pool_size = 8;
     // Enforce the limit while Beast is parsing and buffering the request, before
     // individual handlers parse it. This still leaves headroom for the 10 MiB
     // base64 cover-upload endpoint.
@@ -87,6 +108,8 @@ namespace confighttp {
           BOOST_LOG(debug) << "Configuration UI listener ["sv << listener_name << "] ready at [https://"
                            << listener_address << ':' << port << "]"sv;
         });
+        // start() also returns, without a ready call, when shutdown stopped the server before it began: whoever waits for the start must not wait on.
+        signal_startup();
       }
       catch (boost::system::system_error &err) {
         signal_startup();
@@ -156,8 +179,10 @@ namespace confighttp {
     // Wait for any event
     shutdown_event->view();
 
+    local_auth_token::stop_monitor();
     ai::http::shutdown_streams();
     image_enhancement::api::shutdown();
+    ::sparxie::stop_art_refresh();
     server.stop();
     if (loopback_server) {
       loopback_server->stop();

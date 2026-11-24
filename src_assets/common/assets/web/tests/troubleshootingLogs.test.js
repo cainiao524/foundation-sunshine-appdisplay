@@ -2,6 +2,22 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { nextTick } from 'vue'
 import { useTroubleshooting } from '../composables/useTroubleshooting.js'
+import { fetchLogTail } from '../composables/useLogs.js'
+
+test('the shell and overview share an in-flight tail read and can retry a failed read', async (t) => {
+  const offsets = []
+  t.mock.method(globalThis, 'fetch', async (url, { headers }) => {
+    assert.equal(url, '/api/logs')
+    offsets.push(headers.get('X-Log-Offset'))
+    return offsets.length === 1 ? new Response(null, { status: 503 }) : new Response('latest line')
+  })
+
+  const first = fetchLogTail()
+  assert.equal(fetchLogTail(), first)
+  await assert.rejects(first, /503/)
+  assert.equal(await fetchLogTail(), 'latest line')
+  assert.deepEqual(offsets, ['0', '0'])
+})
 
 const liveResponse = (text, size, range = 'full') => ({
   ok: true,
@@ -114,6 +130,34 @@ test('troubleshooting searches the full retained cache before limiting matching 
     state.logFilter.value = 'early-match'
 
     assert.equal(state.actualLogs.value, 'early-match')
+  } finally {
+    console.warn = originalWarn
+    globalThis.document = originalDocument
+  }
+})
+
+test('troubleshooting decodes an old GBK line before the viewer sees it', async () => {
+  const originalDocument = globalThis.document
+  const originalWarn = console.warn
+  globalThis.document = { addEventListener() {}, removeEventListener() {} }
+  console.warn = () => {}
+
+  const prefix = new TextEncoder().encode('[2026-11-02 10:00:00.000]: Error: ')
+  const gbk = new Uint8Array([0xcf, 0xb5, 0xcd, 0xb3, 0xd5, 0xd2, 0xb2, 0xbb, 0xb5, 0xbd, 0xd6, 0xb8, 0xb6, 0xa8, 0xb5, 0xc4, 0xce, 0xc4, 0xbc, 0xfe, 0xa1, 0xa3])
+  const bytes = new Uint8Array([...prefix, ...gbk])
+  const state = useTroubleshooting({
+    fetchLogs: async () => ({
+      ok: true,
+      status: 200,
+      headers: new Map([['X-Log-Size', String(bytes.length)], ['X-Log-Range', 'full']]),
+      arrayBuffer: async () => bytes.buffer,
+    }),
+  })
+
+  try {
+    await state.refreshLogs()
+    await nextTick()
+    assert.equal(state.logs.value, '[2026-11-02 10:00:00.000]: Error: 系统找不到指定的文件。')
   } finally {
     console.warn = originalWarn
     globalThis.document = originalDocument

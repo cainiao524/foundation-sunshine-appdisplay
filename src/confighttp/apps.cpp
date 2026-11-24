@@ -7,8 +7,10 @@
 #include "apps.h"
 #include "src/app_display_profile.h"
 #include "src/config.h"
+#include "src/generated_cover.h"
 #include "src/confighttp/auth.h"
 #include "src/confighttp/common.h"
+#include "src/default_apps.h"
 #include "src/file_handler.h"
 #include "src/http/types.h"
 #include "src/httpcommon.h"
@@ -17,8 +19,13 @@
 #include "src/nvhttp.h"
 #include "src/platform/run_command.h"
 #include "src/process.h"
+#include "src/platform/common.h"
+#include "src/sparxie/runtime.h"
+#include "src/sparxie/apps_file_lock.h"
 #include "src/utility.h"
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <boost/property_tree/json_parser.hpp>
 #include <filesystem>
 #include <fstream>
@@ -27,8 +34,10 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 
 using namespace std::literals;
+using namespace std::chrono_literals;
 using json = nlohmann::json;
 
 namespace confighttp::apps {
@@ -42,12 +51,53 @@ namespace confighttp::apps {
     std::atomic<bool> apps_writing { false };
 
     void
+    add_cover_metadata(json &app, const generated_cover::cover_t &cover) {
+      app["cover-source"] = cover.source_name;
+      app["cover-effective-style"] = cover.style_name;
+      app["cover-portrait-url"] = cover.portrait.url;
+      app["cover-landscape-url"] = cover.landscape.url;
+      app["cover"] = {
+        { "source", cover.source_name },
+        { "style", cover.style_name },
+        { "portrait", cover.portrait.url },
+        { "landscape", cover.landscape.url },
+      };
+    }
+
+    void
+    strip_cover_metadata(pt::ptree &app) {
+      for (const auto *key : { "cover-source", "cover-effective-style", "cover-portrait-url", "cover-landscape-url", "cover" }) app.erase(key);
+    }
+
+    void
     getApps(resp_https_t response, req_https_t request) {
       if (!authenticate(response, request)) return;
 
       print_req(request);
 
-      std::string content = file_handler::read_file(config::stream.file_apps.c_str());
+      std::string content;
+      {
+        std::lock_guard apps_lock(::sparxie::apps_file_mutex);
+        content = sparxie::typed_apps_text(file_handler::read_file(config::stream.file_apps.c_str()));
+      }
+      try {
+        auto body = json::parse(content);
+        const auto apps = proc::apps_snapshot();
+        if (body.is_object() && body["apps"].is_array()) {
+          for (std::size_t index = 0; index < body["apps"].size() && index < apps.size(); ++index) {
+            // the file and the running list are read at different moments (a save in between changes both): an entry gets the metadata of the application that is at its place and has its name, or none
+            if (!body["apps"][index].is_object() || body["apps"][index].value("name", std::string {}) != apps[index].name) continue;
+            // the list never waits for a download or a drawing (a loopback call that stalls is a defect): the kind of cover and its address are known from the files that are here,
+            // the picture is fetched or drawn when it is asked for
+            const auto cover = generated_cover::describe(proc::cover_app(apps[index], true), config::generated_cover_style(), platf::appdata(), false);
+            add_cover_metadata(body["apps"][index], cover);
+          }
+          content = body.dump(2);
+        }
+      }
+      catch (const std::exception &error) {
+        BOOST_LOG(warning) << "GetApps cover metadata failed: " << error.what();
+      }
       web::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");
       response->write(content, headers);
@@ -72,6 +122,7 @@ namespace confighttp::apps {
         return;
       }
       auto writing_guard = util::fail_guard([]() { apps_writing = false; });
+      std::lock_guard apps_lock(::sparxie::apps_file_mutex);
 
       std::stringstream ss;
       ss << request->content.rdbuf();
@@ -109,8 +160,19 @@ namespace confighttp::apps {
           return true;
         };
 
+        const auto normalize_cover_style = [&](pt::ptree &app_node) {
+          strip_cover_metadata(app_node);
+          const auto style = app_node.get_optional<std::string>("cover-style");
+          if (style && *style != "auto" && !generated_cover::is_style_name(*style)) {
+            outputTree.put("status", "false");
+            outputTree.put("error", "Invalid generated cover style");
+            return false;
+          }
+          return true;
+        };
+
         for (auto &[_, app_node] : input_apps_node) {
-          if (!normalize_gamepad(app_node)) {
+          if (!normalize_cover_style(app_node) || !normalize_gamepad(app_node)) {
             return;
           }
         }
@@ -143,6 +205,9 @@ namespace confighttp::apps {
           if (!normalize_gamepad(input_edit_node)) {
             return;
           }
+          if (!normalize_cover_style(input_edit_node)) {
+            return;
+          }
 
           int index = input_edit_node.get<int>("index");
           input_edit_node.erase("index");
@@ -164,6 +229,8 @@ namespace confighttp::apps {
         }
 
         file_handler::write_json(config::stream.file_apps, fileTree);
+        // the property tree writes a sparxie block with every value as a string: put the types back
+        sparxie::heal_apps_file(config::stream.file_apps);
       }
       catch (std::exception &e) {
         BOOST_LOG(warning) << "SaveApp: "sv << e.what();
@@ -196,6 +263,7 @@ namespace confighttp::apps {
         return;
       }
       auto writing_guard = util::fail_guard([]() { apps_writing = false; });
+      std::lock_guard apps_lock(::sparxie::apps_file_mutex);
 
       pt::ptree outputTree;
       auto g = util::fail_guard([&]() {
@@ -229,6 +297,8 @@ namespace confighttp::apps {
           fileTree.push_back(std::make_pair("apps", newApps));
         }
         file_handler::write_json(config::stream.file_apps, fileTree);
+        // the property tree writes a sparxie block with every value as a string: put the types back
+        sparxie::heal_apps_file(config::stream.file_apps);
       }
       catch (std::exception &e) {
         BOOST_LOG(warning) << "DeleteApp: "sv << e.what();
@@ -284,6 +354,7 @@ namespace confighttp::apps {
         return;
       }
       auto writing_guard = util::fail_guard([]() { apps_writing = false; });
+      std::lock_guard apps_lock(::sparxie::apps_file_mutex);
 
       pt::ptree outputTree;
       auto g = util::fail_guard([&]() {
@@ -385,6 +456,8 @@ namespace confighttp::apps {
         fileTree.push_back(std::make_pair("apps", newApps));
 
         file_handler::write_json(config::stream.file_apps, fileTree);
+        // the property tree writes a sparxie block with every value as a string: put the types back
+        sparxie::heal_apps_file(config::stream.file_apps);
       }
       catch (std::exception &e) {
         BOOST_LOG(warning) << "BatchDeleteApps: "sv << e.what();
@@ -500,6 +573,67 @@ namespace confighttp::apps {
 
       proc::proc.terminate();
       outputTree.put("status", true);
+    }
+
+    /**
+     * Launch through the same process path as a streaming session. The Panel
+     * uses this route so service-hosted processes receive the active user's
+     * token, command parser and configured working directory.
+     * Sources: ds5-ms-shellexecuteexw-20261109 and
+     * ds5-ms-createprocessasuserw-20261109.
+     */
+    void
+    launchApp(resp_https_t response, req_https_t request) {
+      if (!check_content_type(response, request, "application/json")) return;
+      if (!authenticate(response, request)) return;
+
+      pt::ptree outputTree;
+      auto g = util::fail_guard([&]() {
+        std::ostringstream data;
+        pt::write_json(data, outputTree);
+        response->write(data.str());
+      });
+
+      try {
+        std::stringstream ss;
+        ss << request->content.rdbuf();
+        pt::ptree input;
+        pt::read_json(ss, input);
+        const auto app_id = input.get<int>("appId", 0);
+        if (app_id <= 0) {
+          outputTree.put("status", false);
+          outputTree.put("error", "Invalid application id");
+          return;
+        }
+
+        if (proc::proc.running() > 0) {
+          outputTree.put("status", false);
+          outputTree.put("error", "Another application is already running");
+          return;
+        }
+
+        auto session = std::make_shared<rtsp_stream::launch_session_t>();
+        session->client_name = "Big Screen";
+        const auto error = proc::proc.execute(app_id, std::move(session));
+        if (error != 0) {
+          outputTree.put("status", false);
+          outputTree.put("error", "Failed to launch application");
+          outputTree.put("code", error);
+          return;
+        }
+
+        outputTree.put("status", true);
+        outputTree.put("appId", app_id);
+        outputTree.put("appName", proc::proc.get_app_name(app_id));
+        if (const auto pid = proc::proc.get_running_pid()) {
+          outputTree.put("pid", *pid);
+        }
+      }
+      catch (const std::exception &error) {
+        BOOST_LOG(warning) << "LaunchApp: invalid request: " << error.what();
+        outputTree.put("status", false);
+        outputTree.put("error", "Invalid launch request");
+      }
     }
 
     /**
@@ -737,7 +871,70 @@ namespace confighttp::apps {
       }
     }
 
+    void
+    coverPreview(resp_https_t response, req_https_t request) {
+      if (!authenticate(response, request)) return;
+      try {
+        const auto args = request->parse_query_string();
+        const auto query_value = [&args](const char *name) -> std::string {
+          const auto found = args.find(name);
+          if (found == args.end()) throw std::out_of_range(name);
+          return found->second;
+        };
+        const auto app_id = query_value("appid");
+        const auto style_name = query_value("style");
+        const auto orientation_name = query_value("orientation");
+        if (!generated_cover::is_style_name(style_name) || (orientation_name != "portrait" && orientation_name != "landscape")) {
+          response->write(web::StatusCode::bad_request, "Invalid cover preview parameters");
+          return;
+        }
+        const auto apps = proc::apps_snapshot();
+        const auto found = std::find_if(apps.begin(), apps.end(), [&app_id](const auto &app) { return app.id == app_id; });
+        if (found == apps.end()) {
+          response->write(web::StatusCode::not_found, "Application not found");
+          return;
+        }
+        const auto orientation = orientation_name == "portrait" ? generated_cover::orientation_e::portrait : generated_cover::orientation_e::landscape;
+        const auto asset = generated_cover::preview(proc::cover_app(*found, true), generated_cover::style_from_name(style_name), orientation, platf::appdata());
+        if (asset.path.empty() || !std::filesystem::is_regular_file(asset.path)) {
+          response->write(web::StatusCode::not_found, "Cover preview unavailable");
+          return;
+        }
+        web::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", asset.content_type);
+        headers.emplace("Cache-Control", "private, max-age=60");
+        headers.emplace("ETag", "\"" + asset.hash + "\"");
+        if (!response->write_file(web::StatusCode::ok, asset.path, headers)) response->write(web::StatusCode::not_found, "Cover preview unavailable");
+      }
+      catch (const std::out_of_range &) {
+        response->write(web::StatusCode::bad_request, "Missing cover preview parameters");
+      }
+      catch (const std::exception &error) {
+        BOOST_LOG(warning) << "Cover preview failed: " << error.what();
+        response->write(web::StatusCode::bad_request, "Invalid cover preview parameters");
+      }
+    }
+
   }  // namespace
+
+  void
+  retitle_defaults(std::string_view locale) {
+    // the same gate as the saves of the application list: a save that is running finishes first (a short wait), then the names are rewritten
+    bool expected = false;
+    for (int attempt = 0; attempt < 50 && !apps_writing.compare_exchange_strong(expected, true); ++attempt) {
+      expected = false;
+      std::this_thread::sleep_for(100ms);
+    }
+    if (!apps_writing.load()) {
+      BOOST_LOG(warning) << "Default apps: the application list is being saved; names were not changed to ["sv << locale << ']';
+      return;
+    }
+    auto writing_guard = util::fail_guard([]() { apps_writing = false; });
+    std::lock_guard apps_lock(::sparxie::apps_file_mutex);
+    if (default_apps::retitle_file(config::stream.file_apps, locale)) {
+      proc::refresh(config::stream.file_apps);
+    }
+  }
 
   void
   register_routes(https_server_t &server) {
@@ -746,8 +943,10 @@ namespace confighttp::apps {
     server.resource["^/api/apps/([0-9]+)$"]["DELETE"] = deleteApp;
     server.resource["^/api/apps/batch-delete$"]["POST"] = batchDeleteApps;
     server.resource["^/api/apps/close$"]["POST"] = closeApp;
+    server.resource["^/api/apps/launch$"]["POST"] = launchApp;
     server.resource["^/api/covers/upload$"]["POST"] = uploadCover;
     server.resource["^/api/apps/test-menu-cmd$"]["POST"] = testMenuCmd;
+    server.resource["^/api/apps/cover-preview$"]["GET"] = coverPreview;
   }
 
 }  // namespace confighttp::apps

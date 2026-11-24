@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--source', required=True)
@@ -75,6 +76,44 @@ class Configuration(unittest.TestCase):
                 self.configure([f'-DCMAKE_CXX_COMPILER={args.compiler}', f'-DCMAKE_BUILD_TYPE={build_type}'], generator)
                 self.build_project(['--config', 'Debug'])
 
+    def test_gcc_release_build_uses_size_optimization(self):
+        # The GCC fallback must stay inside the release installer budget; Clang keeps its release flags.
+        self.write('probe.cpp', 'int main() { return 0; }\n')
+        self.cmake_project(self.include('cmake/targets/project_options.cmake')
+                           + 'sunshine_gcc_release_size_flag(gcc "GNU")\n'
+                             'sunshine_gcc_release_size_flag(clang "Clang")\n'
+                             'sunshine_gcc_release_size_flag(apple "AppleClang")\n'
+                             'if(NOT gcc STREQUAL "-Os")\n'
+                             'message(FATAL_ERROR "GNU Release must optimise for size")\n'
+                             'endif()\n'
+                             'if(NOT clang STREQUAL "" OR NOT apple STREQUAL "")\n'
+                             'message(FATAL_ERROR "Clang must keep its release optimisation")\n'
+                             'endif()\n'
+                             'set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")\n'
+                             'string(APPEND CMAKE_CXX_FLAGS_RELEASE " ${gcc}")\n'
+                             'add_executable(probe probe.cpp)\n', 'CXX')
+        self.configure([f'-DCMAKE_CXX_COMPILER={args.compiler}', '-DCMAKE_BUILD_TYPE=Release'])
+        self.assertRegex((self.build / 'build.ninja').read_text(encoding='utf-8'), r'-O3 -DNDEBUG -Os\b')
+        # The Windows module must use the same decision and append it after the Release flags.
+        windows = (SOURCE / 'cmake/compile_definitions/windows.cmake').read_text(encoding='utf-8')
+        self.assertIn('sunshine_gcc_release_size_flag', windows)
+        self.assertIn('CMAKE_${lang}_FLAGS_RELEASE', windows)
+        self.assertIn('sunshine_gcc_string_constructor_aliases', windows)
+
+    def test_gcc_string_constructor_aliases_are_gnu_only(self):
+        # GCC 16.2 at -Os calls basic_string's C4 constructor, which libstdc++.a does not export.
+        self.cmake_project(self.include('cmake/targets/project_options.cmake')
+                           + 'sunshine_gcc_string_constructor_aliases(gcc "GNU")\n'
+                             'sunshine_gcc_string_constructor_aliases(clang "Clang")\n'
+                             'list(LENGTH gcc aliases)\n'
+                             'if(NOT aliases EQUAL 2)\n'
+                             'message(FATAL_ERROR "GNU needs the two basic_string constructor aliases: ${gcc}")\n'
+                             'endif()\n'
+                             'if(clang)\n'
+                             'message(FATAL_ERROR "Clang must not take the GNU linker aliases")\n'
+                             'endif()\n')
+        self.configure()
+
     def test_presets_keep_parent_test_install_rules_intact(self):
         self.write('CMakePresets.json', (SOURCE / 'CMakePresets.json').read_text(encoding='utf-8'))
         self.cmake_project('add_subdirectory(tests)\n')
@@ -125,11 +164,12 @@ class Configuration(unittest.TestCase):
 
     def test_web_ui_is_incremental_and_recovers_missing_outputs(self):
         log = self.project / 'npm-calls.txt'
-        npm = self.launcher('npm-stub', '''import pathlib, sys
+        npm = self.launcher('npm-stub', '''import os, pathlib, sys
 root = pathlib.Path(__file__).parent
 with (root / 'npm-calls.txt').open('a') as log: log.write(sys.argv[1] + '\\n')
 if sys.argv[1] == 'ci': (root / 'node_modules').mkdir(exist_ok=True)
 else:
+    (root / 'foundation-ui-used.txt').write_text(os.environ['FOUNDATION_UI_DIR'])
     destination = pathlib.Path(sys.argv[sys.argv.index('--outDir') + 1])
     destination.mkdir(parents=True, exist_ok=True)
     for page in (root / 'src_assets/common/assets/web').glob('*.html'):
@@ -140,16 +180,38 @@ else:
         self.write('src_assets/common/assets/web/index.html', 'page\n')
         script = self.write('src_assets/common/assets/web/main.js', 'initial\n')
         self.write('scripts/vite/vite.config.js', '// config\n')
+        ui = self.root / 'ds5-ui-m3e'
+        (ui / 'src').mkdir(parents=True)
+        (ui / 'package.json').write_text('{}\n', encoding='utf-8')
+        (ui / 'src' / 'index.js').write_text('initial\n', encoding='utf-8')
+        (ui / 'scripts').mkdir()
+        ui_script = ui / 'scripts' / 'helper.js'
+        ui_script.write_text('initial\n', encoding='utf-8')
+        other_ui = self.root / 'other-ui'
+        (other_ui / 'src').mkdir(parents=True)
+        (other_ui / 'package.json').write_text('{}\n', encoding='utf-8')
         self.cmake_project(f'set(NPM "{npm.as_posix()}")\nset(SUNSHINE_SOURCE_ASSETS_DIR "${{PROJECT_SOURCE_DIR}}/src_assets")\n'
                    'set(NPM_SOURCE_ASSETS_DIR "${SUNSHINE_SOURCE_ASSETS_DIR}")\nset(NPM_ASSETS_DIR "${PROJECT_BINARY_DIR}")\n'
                    + self.include('cmake/targets/web_ui.cmake'))
-        self.configure()
+        with patch.dict(os.environ, {'FOUNDATION_UI_DIR': str(ui)}):
+            self.configure()
         def calls():
             before = len(log.read_text().splitlines()) if log.exists() else 0
             self.build_project()
             return log.read_text().splitlines()[before:]
         self.assertEqual(calls(), ['ci', 'run'])
+        self.assertEqual(pathlib.Path((self.project / 'foundation-ui-used.txt').read_text()), ui)
         self.assertEqual(calls(), [])
+        # An automatic reconfigure in a changed environment keeps the chosen
+        # checkout, and edits to that checkout still rebuild the bundle.
+        with patch.dict(os.environ, {'FOUNDATION_UI_DIR': str(other_ui)}):
+            (ui / 'src' / 'added.js').write_text('added\n', encoding='utf-8')
+            self.assertEqual(calls(), ['run'])
+            self.assertEqual(pathlib.Path((self.project / 'foundation-ui-used.txt').read_text()), ui)
+            (ui / 'src' / 'index.js').write_text('edited\n', encoding='utf-8')
+            self.assertEqual(calls(), ['run'])
+            ui_script.write_text('edited\n', encoding='utf-8')
+            self.assertEqual(calls(), ['run'])
         script.write_text('edited\n')
         self.assertEqual(calls(), ['run'])
         lock.write_text('{"changed":true}\n')
@@ -158,6 +220,9 @@ else:
         self.assertEqual(calls(), ['run'])
         shutil.rmtree(self.project / 'node_modules')
         self.assertEqual(calls(), ['ci', 'run'])
+        self.configure([f'-DFOUNDATION_UI_DIR={other_ui.as_posix()}'])
+        self.assertEqual(calls(), ['run'])
+        self.assertEqual(pathlib.Path((self.project / 'foundation-ui-used.txt').read_text()), other_ui)
 
     def test_asset_copies_preserve_paths_edits_additions_and_removals(self):
         first = self.write('src_assets/common/assets/first/icon.txt', 'first\n')

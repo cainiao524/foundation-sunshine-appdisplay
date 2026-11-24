@@ -13,6 +13,8 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -58,6 +60,7 @@ namespace video {
     std::string nr_state { "disabled" };
     std::string nr_failure_reason;
     bool nr_toggle_supported {};
+    bool nr_app_allowed = true;
     bool nr_requested_enabled {};
     int nr_requested_scale_percent = 100;
     int nr_scale_percent = 100;
@@ -84,7 +87,7 @@ namespace video {
   std::vector<hdr_pipeline_status_t>
   get_hdr_pipeline_statuses();
 
-  // Requests are consumed only by the owning conversion thread at a frame boundary.
+  // Requests are consumed only by the owning encode thread at a frame boundary.
   struct nr_request_t {
     bool enabled;
     int scale_percent;
@@ -96,12 +99,15 @@ namespace video {
     float skin_structure_strength = 0.0f;
     bool auto_mask = false;
   };
+  using nr_change_signal_t = safe::signal_t;
   int request_nr_enabled(std::uint64_t id, bool enabled, std::optional<int> scale_percent = std::nullopt,
     std::optional<float> intensity = std::nullopt, std::optional<bool> ui_correction = std::nullopt,
     std::optional<int> motion_quality = std::nullopt,
     std::optional<int> style = std::nullopt, std::optional<float> skin_structure_strength = std::nullopt,
     std::optional<bool> auto_mask = std::nullopt);
-  std::optional<nr_request_t> requested_nr_settings(std::uint64_t id);
+  std::optional<nr_request_t> requested_nr_settings(std::uint64_t id, std::optional<bool> global_enabled = std::nullopt);
+  std::shared_ptr<nr_change_signal_t> nr_change_signal(std::uint64_t id);
+  void notify_nr_change();
   bool rollback_nr_settings(std::uint64_t id, const nr_request_t &failed, const nr_request_t &previous);
 
   // 动态参数调节类型
@@ -204,6 +210,9 @@ namespace video {
     platf::pre_encode_filter_e pre_encode_filter = platf::pre_encode_filter_e::none;
     platf::pre_encode_filter_config_t pre_encode_filter_config;
     boost::shared_ptr<const image_enhancement::backend_use_t> enhancement_backend;
+    // Launch and resume supply the app policy. Standalone encode devices use
+    // their caller's explicit filter configuration.
+    std::optional<bool> nr_app_allowed;
     // Local diagnostics only; never serialized into the media protocol.
     std::uint32_t perf_session_id = 0;
     bool pyrowave_dynamic_hdr_mapping = false;
@@ -400,7 +409,7 @@ namespace video {
           name { std::move(name) }, value { std::move(value) } {}
     };
 
-    const std::unique_ptr<const encoder_platform_formats_t> platform_formats;
+    const std::shared_ptr<const encoder_platform_formats_t> platform_formats;  ///< shared: a copy of the encoder (the health check probes one) uses the same formats
 
     struct codec_t {
       std::vector<option_t> common_options;
@@ -449,6 +458,14 @@ namespace video {
 
     virtual int
     convert(platf::img_t &img) = 0;
+
+    virtual std::shared_ptr<safe::signal_t>
+    nr_change_event() {
+      return {};
+    }
+
+    virtual void
+    apply_nr_change() {}
 
     virtual void
     request_idr_frame() = 0;
@@ -503,24 +520,26 @@ namespace video {
     virtual int64_t
     frame_index() = 0;
 
-    virtual uint8_t *
+    virtual const uint8_t *
     data() = 0;
 
     virtual size_t
     data_size() = 0;
 
     struct replace_t {
-      std::string_view old;
-      std::string_view _new;
+      std::string old;
+      std::string _new;
 
       KITTY_DEFAULT_CONSTR_MOVE(replace_t)
 
-      replace_t(std::string_view old, std::string_view _new) noexcept:
-          old { std::move(old) }, _new { std::move(_new) } {}
+      replace_t(std::string_view old, std::string_view _new):
+          old { old }, _new { _new } {}
     };
 
-    std::vector<replace_t> *replacements = nullptr;
-    void *channel_data = nullptr;
+    std::shared_ptr<const std::vector<replace_t>> replacements;
+    std::uint64_t channel_data = 0;
+    // Only independent PyroWave frames opt into replacing a pending frame.
+    bool pyrowave_pending_replace = false;
     bool after_ref_frame_invalidation = false;
     unsigned fec_percentage = 0;  // Protection budget when this frame was submitted.
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
@@ -546,7 +565,7 @@ namespace video {
       return av_packet->pts;
     }
 
-    uint8_t *
+    const uint8_t *
     data() override {
       return av_packet->data;
     }
@@ -574,7 +593,7 @@ namespace video {
       return index;
     }
 
-    uint8_t *
+    const uint8_t *
     data() override {
       return frame_data.data();
     }
@@ -585,6 +604,23 @@ namespace video {
     }
 
     std::vector<uint8_t> frame_data;
+    int64_t index;
+    bool idr;
+  };
+
+  // Holds immutable packetized bytes through asynchronous broadcast without
+  // copying them. The broadcast path only reads packet data before producing
+  // its own writable RTP buffers.
+  struct packet_raw_shared: packet_raw_t {
+    packet_raw_shared(std::shared_ptr<const std::vector<uint8_t>> frame_data, int64_t frame_index, bool idr):
+        frame_data { std::move(frame_data) }, index { frame_index }, idr { idr } {}
+
+    bool is_idr() override { return idr; }
+    int64_t frame_index() override { return index; }
+    const uint8_t *data() override { return frame_data->data(); }
+    size_t data_size() override { return frame_data->size(); }
+
+    std::shared_ptr<const std::vector<uint8_t>> frame_data;
     int64_t index;
     bool idr;
   };
@@ -646,11 +682,18 @@ namespace video {
   std::string
   active_encoder_name();
 
+  /**
+   * @brief The encoder family of the snapshot the running sessions use, even while a later probe failed or is running (active_encoder_name answers empty then).
+   * @return Encoder identifier, or an empty string when no probe ever succeeded.
+   */
+  std::string
+  session_encoder_name();
+
   void
   capture(
     safe::mail_t mail,
     config_t config,
-    void *channel_data,
+    std::uint64_t channel_data,
     std::optional<safe::mail_raw_t::event_t<dynamic_param_t>> dynamic_param_events = std::nullopt,
     int packet_size = 0);
 
@@ -669,6 +712,61 @@ namespace video {
    *
    * @warning This is only safe to call when there is no client actively streaming.
    */
+  /**
+   * @brief Drop the memo of the last successful probe, so the next launch probes again.
+   * @note The temporary option swap of a recovery attempt calls it around itself: a probe made with other options must not be reused by a launch with the normal ones.
+   */
+  void
+  forget_encoder_probe_result();
+
   int
   probe_encoders(std::optional<probe_target_t> target = std::nullopt);
+
+  /** One codec of a health-check probe. */
+  struct doctor_codec_result_t {
+    bool tested = false;
+    bool passed = false;
+    bool hdr = false;
+    bool yuv444 = false;
+  };
+
+  /** A read-only re-probe of one encoder backend, for the health check (体检). */
+  struct doctor_encoder_result_t {
+    std::string name;
+    bool ran = false;
+    std::string skipped_reason;  ///< "busy" (another probe held the lock past the wait), "no_display", "unknown"
+    bool usable = false;
+    std::string failure;  ///< "display", "unsupported_gpu", "h264_session"
+    doctor_codec_result_t h264, hevc, av1;
+    std::int64_t elapsed_ms = 0;
+  };
+
+  /** Names of the encoder backends of this build, in probe order. */
+  std::vector<std::string>
+  encoder_backend_names();
+
+  /**
+   * @brief Probes one backend the way the startup probe does, on a copy of the encoder, testing every codec.
+   * @details The chosen encoder, the codec modes and the probe result of the host are left alone. It holds
+   *          the probe lock (waiting up to 12 s for it), so a stream start waits for at most one backend;
+   *          the caller checks for streams.
+   */
+  doctor_encoder_result_t
+  doctor_probe_encoder(const std::string &name);
+
+  struct doctor_capture_result_t {
+    bool ran = false;
+    std::string skipped_reason;  ///< "busy", "no_display"
+    bool ok = false;
+    std::string method;  ///< the capture backend that ran: config capture, its probe stand-in, or "auto"
+    std::string display;
+    int width = 0;
+    int height = 0;
+    std::int64_t first_frame_ms = 0;
+    std::string failure;  ///< "open", "error", "no_frame"
+  };
+
+  /** Opens the configured display with the configured capture method and waits for one frame; the frame is dropped. */
+  doctor_capture_result_t
+  doctor_probe_capture(std::chrono::milliseconds budget);
 }  // namespace video

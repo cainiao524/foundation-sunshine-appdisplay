@@ -23,6 +23,16 @@ location by modifying the configuration file.
 Although it is recommended to use the configuration UI, it is possible manually configure Sunshine by
 editing the `conf` file in a text editor. Use the examples as reference.
 
+### Windows capture session
+
+The GUI independently selects the active interactive user, preferring the console and falling back
+to an active RDP user, and receives permission to read that user's local authentication token.
+
+Capture uses the console by default. Set `session_binding = 0` in `sunshine.conf` to use automatic
+selection, or `1` to explicitly select the console. Restart the Sunshine service after changing this
+setting. A console without a signed-in user may show the Windows sign-in screen and does not
+provide the desktop of a separate RDP session.
+
 ## [General](https://localhost:47990/config/#general)
 
 ### [locale](https://localhost:47990/config/#locale)
@@ -235,6 +245,42 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### [pin_prompt](https://localhost:47990/config/#pin_prompt)
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Where a pairing request asks for its PIN. <code>fullscreen</code> opens the control panel's full-screen
+            PIN entry; <code>panel</code> opens the control panel on its own pairing page instead. The control panel
+            reads the saved value each time a client asks to pair, so a change applies to the next request without
+            restarting Sunshine. It applies to pairing requests handled by the Foundation Panel; when the host's own
+            tray handles them because no Panel is running, the Web UI <code>/pin</code> page still opens.
+        </td>
+    </tr>
+    <tr>
+        <td>Choices</td>
+        <td colspan="2">
+            <table>
+                <tr><td>fullscreen</td><td>Full-screen PIN entry</td></tr>
+                <tr><td>panel</td><td>Enter the PIN on the control panel's pairing page</td></tr>
+            </table>
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            fullscreen
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            pin_prompt = panel
+            @endcode</td>
+    </tr>
+</table>
+
 ### [stop_on_last_video_session](https://localhost:47990/config/#stop_on_last_video_session)
 
 <table>
@@ -288,6 +334,30 @@ editing the `conf` file in a text editor. Use the examples as reference.
             widget_token = 5f1e9a3c-2b7d-4e6a-9c1f-8a2b3d4e5f60
             @endcode</td>
     </tr>
+</table>
+
+### telemetry_consent
+
+<table>
+    <tr><td>Description</td><td>Usage statistics: counts of what is used and numbers about how streams perform, sent to the developers' own server (api.alkaidlab.com). What is sent and what is never sent: <a href="privacy_telemetry.md">privacy_telemetry.md</a>. Changed in the control panel or the Web UI under About › Privacy; the change takes effect at once.</td></tr>
+    <tr><td>Default</td><td><code>on</code></td></tr>
+    <tr><td>Example</td><td><code>telemetry_consent = off</code></td></tr>
+</table>
+
+### telemetry_errors
+
+<table>
+    <tr><td>Description</td><td>Error reports: error records with personal details removed, and crash reports. A stored <code>telemetry_consent = off</code> from the earlier single choice also reads as off here until this key is set to <code>on</code>.</td></tr>
+    <tr><td>Default</td><td><code>on</code></td></tr>
+    <tr><td>Example</td><td><code>telemetry_errors = off</code></td></tr>
+</table>
+
+### telemetry_endpoint
+
+<table>
+    <tr><td>Description</td><td>The server the statistics and error reports go to (for a test server). Batches are posted to <code>&lt;endpoint&gt;/v1/events</code>.</td></tr>
+    <tr><td>Default</td><td><code>https://api.alkaidlab.com</code></td></tr>
+    <tr><td>Example</td><td><code>telemetry_endpoint = http://127.0.0.1:8787</code></td></tr>
 </table>
 
 ## [Input](https://localhost:47990/config/#input)
@@ -859,17 +929,19 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td colspan="2">
             Selects how Moonlight microphone PCM is exposed to Windows applications.
             `vb_cable` writes to the VB-CABLE render endpoint and applications capture its paired endpoint.
-            `usbip_experimental` injects PCM directly into the signed Virtual Device Host microphone IN endpoint;
-            it does not use a render-to-capture loopback. `auto` tries USB/IP first and falls back to VB-CABLE.
+            `usbip_experimental` creates the host's own USB microphone ("Sunshine Virtual Microphone", USB Audio Class 1.0,
+            48 kHz mono) on the in-box usbip-win2 path and feeds it the decoded client microphone stream; applications
+            record it as a normal capture device and no VB-CABLE is needed. It does not use a render-to-capture loopback
+            and never changes the Windows default audio devices. `auto` tries the USB microphone first and falls back to VB-CABLE.
             `disabled` rejects microphone redirection while leaving the Moonlight microphone feature setting intact.
-            @warning{The USB/IP backend is experimental and currently uses the DualSense composite prototype profile.}
+            @note{The USB microphone needs the usbip-win2 host component (`usbip.exe` and its driver). See docs/virtual_microphone.md.}
             @note{This option is only supported on Windows.}
         </td>
     </tr>
     <tr>
         <td>Default</td>
         <td colspan="2">@code{}
-            vb_cable
+            auto
             @endcode</td>
     </tr>
     <tr>
@@ -1503,13 +1575,18 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
-### [external_ip](https://localhost:47990/config/#external_ip)
+### [external_endpoints](https://localhost:47990/config/#external_endpoints)
 
 <table>
     <tr>
         <td>Description</td>
         <td colspan="2">
-            If no external IP address is given, Sunshine will attempt to automatically detect external ip-address.
+            The public addresses clients use from outside the network, written the way a host is added in Moonlight:
+            a DNS name, an IPv4 address or an IPv6 address, each with an optional port. The port is the HTTP port the
+            router exposes (the base port by default); the HTTPS pairing port is five below it. The external port need
+            not equal the internal one. Separate several entries with commas. An IPv6 address with a port is written
+            in brackets. At most 8 entries are used. The first entry goes into the pairing QR code, and the network
+            check tests every entry. If empty, the legacy @ref external_ip "external_ip" value is used.
         </td>
     </tr>
     <tr>
@@ -1519,11 +1596,136 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Example</td>
         <td colspan="2">@code{}
-            external_ip = 123.456.789.12
+            external_endpoints = home.example.net:60000, 203.0.113.9, [2001:db8::1]:57989
             @endcode</td>
     </tr>
 </table>
 
+### [external_ip](https://localhost:47990/config/#external_ip)
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            The public address clients use outside the network: an IP address or a DNS host name (for example a dynamic DNS name).
+            The value is validated; a malformed value is ignored with a warning. If it is not set, Sunshine uses the
+            automatically discovered address and clients fall back to discovery.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">Automatic</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            external_ip = 203.0.113.9
+            external_ip = home.example.ddns.net
+            @endcode</td>
+    </tr>
+</table>
+
+
+### [stun_servers](https://localhost:47990/config/#stun_servers)
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            The STUN servers the network overview asks for the public IPv4 and IPv6 addresses and the NAT mapping
+            behaviour (RFC 8489, RFC 5780). Up to 8 entries of a host name or an IP address with an optional port
+            (3478 by default), separated by commas; an IPv6 address with a port is written in brackets. Leave it empty
+            for the built-in list: with a zh-CN locale or a China time zone it asks Xiaomi, Bilibili, Douyu and Mango TV
+            first, then Cloudflare; elsewhere Cloudflare, Google, then the mainland servers. `none` turns STUN off; the
+            overview then shows only the interface addresses and the router check. These are third-party servers: they
+            are contacted only when the network overview is opened, rechecked, or run by the doctor, never in the
+            background, and the result is kept 10 minutes. The page lists the servers it asked.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">Built-in list (see docs/api/network-overview.md)</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            stun_servers = stun.miwifi.com, stun.chat.bilibili.com:3478, stun.cloudflare.com
+            @endcode</td>
+    </tr>
+</table>
+
+### network_external_check
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            `enabled`: when you press "check" on the network page, a service on the internet connects from outside to each public address you entered and to the TCP ports of this host, and reads this
+            host's GameStream `serverinfo` to compare its unique id with the one this host sends. That is the only way to show that the internet reaches this host: a computer cannot prove it by
+            connecting to its own public address. Nothing is sent while you do not run the check, and an answer is kept for 10 minutes, so pressing the button again does not ask again. The exceptions are the answers that may be out of date in a minute: a port that was found closed or silent, and a refusal (the service saw another address than the one you entered) are kept 1 minute, and a service that asks to wait is not asked before the time it names (1 to 10 minutes).
+            What leaves the computer is the address you entered, the ports of this host, its unique id and an install identifier that the service uses to limit how often one installation may ask:
+            the install identifier of the statistics when statistics are on, otherwise a random value made once per run of the program (it is not kept and is new after a restart). The service only
+            connects to the address the request came from, stores nothing, and answers per port. UDP cannot be tried this way and is always reported as not verified. The service has a daily budget:
+            when it is used up, when it does not answer, or when it sees another address than your router's (a proxy on the router), the check says so and keeps the result of this computer alone;
+            none of these is a failure of your host. Any value other than `enabled` turns it off.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">enabled</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            network_external_check = disabled
+            @endcode</td>
+    </tr>
+</table>
+
+### network_external_endpoint
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            The base URL of the service of the outside check (see [network_external_check](#network_external_check)); the request goes to `<endpoint>/v1/reach-probe`. Empty uses the built-in service.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">empty (the built-in service)</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            network_external_endpoint = https://reach.example.net
+            @endcode</td>
+    </tr>
+</table>
+
+### network_bypass_proxy
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            `enabled`: the probes of the network check (the address discovery, the handshake with this host's own public address and the outside check) leave through the physical network adapter, not
+            through the tunnel adapter of a proxy that has taken the default route. The check never reads the system proxy settings: it opens plain TCP and UDP sockets. If the physical adapter has no
+            way out (a computer that reaches the internet only through the tunnel), the check says so and repeats the probe on the system route. A proxy that runs on the router cannot be bypassed from
+            here; the check tells it apart. Any value other than `enabled` uses the system route.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">enabled</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            network_bypass_proxy = disabled
+            @endcode</td>
+    </tr>
+</table>
 ### [lan_encryption_mode](https://localhost:47990/config/#lan_encryption_mode)
 
 <table>
@@ -2753,6 +2955,34 @@ alone does not establish that the presentation latency is acceptable.
 </table>
 
 ## [AMD AMF Encoder](https://localhost:47990/config/#amd-amf-encoder)
+
+### [amd_vpe](https://localhost:47990/config/#amd_vpe)
+
+Windows-only experimental preference for AMD VPE frame conversion, shared by SDR and HDR streams.
+Defaults to `disabled`; enable with `amd_vpe = enabled` or the AMD AMF settings page, save and apply,
+then start a new stream.
+Requires AMF runtime 1.5.3 or newer and a device reporting VPE availability. Supports Rec.601/709
+BGRA/RGBA SDR to NV12, and linear scRGB to PQ/HLG P010, including scaling and aspect-ratio padding.
+HLG uses the capture display's nominal peak (1000-nit fallback) and BT.2100 system gamma in an extra
+GPU prepass producing scene-linear Rec.2020; AMF performs the HLG OETF, scaling and YUV conversion.
+HLG submits scene-linear input; the driver controls the subsequent processing/resampling order.
+AMF's resampling and chroma filtering can differ from the shader backend; this is not a promise of identical pixels.
+Rotation, non-shareable inputs and unsupported formats, layouts, HLG parameters or driver features
+retain the existing shader path under the same switch.
+
+Dynamic HDR statistics remain enabled at the existing cadence. For VPE HDR, they are decoded from a
+private P010 copy of the actual converted output, including PQ/HLG, full/limited range and the active
+picture rectangle. They reflect quantized 4:2:0 output rather than unscaled capture pixels. Padding is
+excluded; analysis remains nonblocking and skips samples while a previous readback is pending.
+If these analysis resources cannot be created, HDR sessions requiring dynamic metadata use the shader
+backend instead. The default shader backend retains its existing scRGB/snapshot statistics.
+
+The backend requests `VPE_PREFERRED`: the driver may still use compute for unsupported configurations.
+Logs and the runtime conversion label report this preference, not proof of VPE execution. The experiment
+waits for GPU completion and copies the converted GPU output into the encoder's existing texture; it
+may increase latency. Its periodic timing includes synchronization and that copy. Ordinary D3D11 shader
+timings are not reported as VPE execution time. Conversion failures disable the experiment for the stream
+and restore the shader path; the configuration switch remains enabled for the next stream.
 
 ### [amd_usage](https://localhost:47990/config/#amd_usage)
 

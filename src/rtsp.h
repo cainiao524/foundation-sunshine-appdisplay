@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -17,6 +18,7 @@
 #include "hdr/client_display_capabilities.h"
 #include "image_enhancement/config.h"
 #include "launch_session_manager.h"
+#include "rtsp_limits.h"
 #include "src/platform/frame_contract.h"
 
 namespace stream::session {
@@ -66,6 +68,7 @@ namespace rtsp_stream {
 
     // Shared with the active stream after RTSP allocation; released on failure/expiry.
     std::shared_ptr<void> nvidia_vsync_lease;
+    std::shared_ptr<void> touch_keyboard_lease;
 
     bool host_audio;
     std::string unique_id;
@@ -87,10 +90,18 @@ namespace rtsp_stream {
 
     // Client-declared intent to use the on-screen touch keyboard during the
     // session.  Tri-state: -1 undeclared (fall back to the per-client server
-    // profile), 0 explicitly off, 1 explicitly on.  When effective-on, the
-    // host attaches the virtual USB touchscreen and applies the touch
-    // keyboard AutoInvoke registry key group for the session.
+    // profile), 0 explicitly off and 1 explicitly on. The GUI applies the
+    // preference when it runs in the same Windows session as the capture.
     int touch_keyboard { -1 };
+    // The client's product family is a touch device (VoidLink runs on phones and tablets). It only answers the
+    // application's question "is this a touch client" (SUNSHINE_CLIENT_TOUCH) when touch_keyboard is undeclared;
+    // it never switches the touch keyboard registry group on.
+    bool touch_family { false };
+
+    // When this launch session was made (the /launch or /resume request), and when the last RTSP step on it ended.
+    // The RTSP handler logs the time of every step against these two, so a slow connect shows which step took it.
+    std::chrono::steady_clock::time_point created { std::chrono::steady_clock::now() };
+    std::chrono::steady_clock::time_point last_rtsp_step { std::chrono::steady_clock::now() };
     // Client-declared controller emulation type for this session (Sunshine
     // protocol extension carried on the /launch and /resume query string).
     // Empty = undeclared: the host-side selection chain applies as before.
@@ -127,6 +138,7 @@ namespace rtsp_stream {
     bool setup_control { false };
     bool setup_mic { false };
     bool control_only { false };
+    bool endpoint_auto_refresh { false };
 
     // GameStream 的 RTSP 请求可能分别使用独立 TCP 连接，
     // 但一个启动票据最多只能创建一个串流会话。

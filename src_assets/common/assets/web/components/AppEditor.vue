@@ -77,6 +77,30 @@
         <CommandTable :commands="formData['menu-cmd']" :platform="platform" type="menu" @add-command="addMenuCommand" @remove-command="removeMenuCommand" @test-command="testMenuCommand" @order-changed="handleMenuCommandOrderChanged" />
       </MSection>
 
+      <!-- per-app display scheme: server-side profile, same fields as the C++ parser -->
+      <MSection v-if="isWindows" :title="t('apps.display_profile_title')" :text="t('apps.display_profile_policy_desc')">
+        <MChoiceItem v-model="appDisplayOutput" :title="t('config.output_name_windows')" :options="displayOutputOptions" :cancel-label="t('_common.cancel')" />
+        <template v-if="hasForcedDisplayProfile">
+          <MBanner v-if="formData['display-target'] === 'virtual' && formData['display-device-prep'] === 'ensure_only_display'" tone="warning" icon="warning">
+            {{ t('apps.display_profile_exclusive_warning') }}
+          </MBanner>
+          <MChoiceItem v-model="formData['display-device-prep']" :title="t('config.display_device_prep_windows')" :options="topologyOptions" :cancel-label="t('_common.cancel')" />
+          <MChoiceItem v-model="appResolutionRule" :title="t('apps.display_profile_resolution')" :options="resolutionRuleOptions" :cancel-label="t('_common.cancel')" />
+          <p v-if="resHintText" class="apps-hint">{{ resHintText }}</p>
+          <MChoiceItem v-model="appRefreshRateRule" :title="t('apps.display_profile_refresh_rate')" :options="refreshRuleOptions" :cancel-label="t('_common.cancel')" />
+          <p v-if="rrHintText" class="apps-hint">{{ rrHintText }}</p>
+          <MSwitchItem v-model="fixedValuesEnabled" :title="t('apps.display_profile_advanced_title')" :supporting="t('apps.display_profile_advanced_sub')" />
+          <MGroup v-if="fixedValuesEnabled">
+            <MFieldItem v-model.trim="formData['display-resolution']" :label="t('apps.display_profile_fixed_resolution')" :supporting="t('apps.display_profile_advanced_res_note')" :error="resolutionFieldError" placeholder="1920x1080" />
+            <MFieldItem v-model.trim="formData['display-refresh-rate']" :label="t('apps.display_profile_fixed_refresh_rate')" :error="refreshFieldError" placeholder="59.94" />
+          </MGroup>
+          <MChoiceItem v-model="formData['display-hdr']" :title="t('apps.display_profile_fixed_hdr')" :options="hdrOptions" :cancel-label="t('_common.cancel')" />
+          <MFooter>{{ t('apps.display_profile_advanced_hdr_note') }}</MFooter>
+          <MChoiceItem v-model="formData['display-disconnect-action']" :title="t('apps.display_profile_disconnect')" :options="disconnectOptions" :cancel-label="t('_common.cancel')" />
+          <MChoiceItem v-model="formData['display-dynamic-resolution-follow-display']" :title="t('apps.display_profile_dynamic_follow')" :options="dynamicFollowOptions" :cancel-label="t('_common.cancel')" />
+        </template>
+      </MSection>
+
       <!-- advanced (expert): shown after the person confirms, or at once when the application already uses one of them -->
       <div v-if="!showAdvanced" class="apps-gate">
         <MIcon name="tune" />
@@ -172,6 +196,7 @@ import { useSparxieCopy } from '../composables/useSparxieCopy.js'
 import { DEFAULT_CATALOG } from '../utils/sparxie/model.js'
 import { getImagePreviewUrl } from '../utils/imageUtils.js'
 import { COVER_STYLE_AUTO, appCoverChoice, coverAppId, isPlaceholderImagePath, coverPreviewUrl, coverSourceOf, isCoverStyle, normalizeCoverStyle, withoutCoverReport } from '../utils/generatedCover.js'
+import { normalizeAppDisplayProfile, validDisplayResolution, validDisplayRefreshRate } from '../utils/appDisplayProfile.js'
 import { hostData } from '../composables/hostData.js'
 
 const DEFAULT_FORM_DATA = Object.freeze({
@@ -201,6 +226,16 @@ const DEFAULT_FORM_DATA = Object.freeze({
     'middle-gray': 50,
     'peak-nits': 1000,
   },
+  'display-target': '',
+  'display-device-prep': '',
+  'display-resolution-mode': '',
+  'display-refresh-rate-mode': '',
+  'display-output-name': '',
+  'display-resolution': '',
+  'display-refresh-rate': '',
+  'display-hdr': '',
+  'display-disconnect-action': '',
+  'display-dynamic-resolution-follow-display': '',
 })
 
 const FIELD_VALIDATION_MAP = Object.freeze({
@@ -305,6 +340,147 @@ const heroUrl = computed(() => {
 const pageTitle = computed(() => (isNewApp.value ? t('apps.add_new') : formData.value?.name || t('apps.edit')))
 const toCover = () => document.getElementById('apps-cover')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 const isNewApp = computed(() => !props.app || props.app.index === -1)
+// ---- App Display Profile (server-side per-app display scheme) ----
+const displayDevices = ref([])
+const applyDisplayDevices = (config) => {
+  displayDevices.value = Array.isArray(config?.display_devices) ? config.display_devices : []
+}
+applyDisplayDevices(hostData.peek('config'))
+
+const friendlyDisplayName = (device) => {
+  const data = String(device?.data || '')
+  const friendly = data.match(/FRIENDLY NAME:\s*(.+)/i)?.[1]?.trim()
+  const display = data.match(/DISPLAY NAME:\s*(\S+)/i)?.[1] || data.match(/(DISPLAY\d+)/i)?.[1]
+  if (friendly && display) return `${friendly} (${display})`
+  return friendly || display || device?.device_id || ''
+}
+
+const hasForcedDisplayProfile = computed(() => Boolean(formData.value?.['display-target']))
+const appDisplayOutput = computed({
+  get: () => {
+    const target = formData.value?.['display-target']
+    if (!target) return '__inherit__'
+    if (target === 'virtual') return 'ZakoHDR'
+    return formData.value?.['display-output-name'] || '__physical__'
+  },
+  set: (outputName) => {
+    if (outputName === '__inherit__') {
+      formData.value['display-target'] = ''
+      formData.value['display-output-name'] = ''
+    } else if (outputName === 'ZakoHDR') {
+      formData.value['display-target'] = 'virtual'
+      formData.value['display-output-name'] = ''
+    } else {
+      formData.value['display-target'] = 'physical'
+      formData.value['display-output-name'] = outputName === '__physical__' ? '' : outputName
+    }
+  },
+})
+const displayOutputOptions = computed(() => {
+  const options = [
+    { value: '__inherit__', label: t('apps.display_profile_inherit') },
+    { value: '__physical__', label: t('apps.display_profile_physical') },
+    { value: 'ZakoHDR', label: t('apps.display_profile_virtual') },
+  ]
+  for (const device of displayDevices.value) {
+    const data = String(device?.data || '')
+    if (/FRIENDLY NAME:\s*Zako HDR/i.test(data) || device.device_id === 'ZakoHDR') continue
+    options.push({ value: device.device_id, label: friendlyDisplayName(device) })
+  }
+  const selected = appDisplayOutput.value
+  if (selected && !['__inherit__', '__physical__', 'ZakoHDR'].includes(selected) && !options.some((option) => option.value === selected)) {
+    options.push({ value: selected, label: selected })
+  }
+  return options
+})
+const topologyOptions = computed(() => [
+  { value: '', label: t('apps.display_profile_inherit') },
+  { value: 'no_operation', label: t('config.display_device_prep_no_operation_windows') },
+  { value: 'ensure_active', label: t('config.display_device_prep_ensure_active_windows') },
+  { value: 'ensure_primary', label: t('config.display_device_prep_ensure_primary_windows') },
+  { value: 'ensure_secondary', label: t('config.display_device_prep_ensure_secondary_windows') },
+  { value: 'ensure_only_display', label: t('config.display_device_prep_ensure_only_display_windows') },
+])
+const displayRuleModes = Object.freeze({
+  '': 'inherit',
+  no_operation: 'no_operation',
+  client: 'follow_client',
+})
+const displayRuleValue = (mode) => {
+  if (mode === 'no_operation') return 'no_operation'
+  if (mode === 'follow_client') return 'client'
+  return ''
+}
+const resolutionRuleOptions = computed(() => [
+  { value: 'inherit', label: t('apps.display_profile_inherit') },
+  { value: 'no_operation', label: t('apps.display_profile_no_operation') },
+  { value: 'follow_client', label: t('config.resolution_change_automatic_windows') },
+])
+const refreshRuleOptions = computed(() => [
+  { value: 'inherit', label: t('apps.display_profile_inherit') },
+  { value: 'no_operation', label: t('apps.display_profile_no_operation') },
+  { value: 'follow_client', label: t('config.refresh_rate_change_automatic_windows') },
+])
+const hdrOptions = computed(() => [
+  { value: '', label: t('apps.display_profile_fixed_hdr_inherit') },
+  { value: 'client', label: t('apps.display_profile_follow_client') },
+  { value: 'no_operation', label: t('apps.display_profile_no_operation') },
+  { value: 'on', label: t('apps.display_profile_fixed_hdr_on') },
+  { value: 'off', label: t('apps.display_profile_fixed_hdr_off') },
+])
+const disconnectOptions = computed(() => [
+  { value: '', label: t('apps.display_profile_inherit') },
+  { value: 'keep', label: t('apps.display_profile_keep') },
+  { value: 'restore', label: t('apps.display_profile_restore') },
+])
+const dynamicFollowOptions = computed(() => [
+  { value: '', label: t('apps.display_profile_inherit') },
+  { value: 'enabled', label: t('apps.display_profile_enabled') },
+  { value: 'disabled', label: t('apps.display_profile_disabled') },
+])
+const hasFixedResolution = computed(() => Boolean(formData.value?.['display-resolution']?.trim()))
+const hasFixedRefreshRate = computed(() => Boolean(formData.value?.['display-refresh-rate']?.trim()))
+const fixedValuesEnabled = ref(false)
+watch(fixedValuesEnabled, (enabled) => {
+  if (!enabled && formData.value) {
+    formData.value['display-resolution'] = ''
+    formData.value['display-refresh-rate'] = ''
+  }
+})
+const appResolutionRule = computed({
+  get: () => displayRuleModes[formData.value?.['display-resolution-mode']] || 'inherit',
+  set: (mode) => {
+    formData.value['display-resolution-mode'] = displayRuleValue(mode)
+  },
+})
+const appRefreshRateRule = computed({
+  get: () => displayRuleModes[formData.value?.['display-refresh-rate-mode']] || 'inherit',
+  set: (mode) => {
+    formData.value['display-refresh-rate-mode'] = displayRuleValue(mode)
+  },
+})
+const displayProfileValid = computed(() => {
+  if (!formData.value?.['display-target']) return true
+  if (hasFixedResolution.value && !validDisplayResolution(formData.value['display-resolution'])) return false
+  if (hasFixedRefreshRate.value && !validDisplayRefreshRate(formData.value['display-refresh-rate'])) return false
+  return true
+})
+const resolutionFieldError = computed(() => (hasFixedResolution.value && !validDisplayResolution(formData.value['display-resolution']) ? t('apps.display_profile_fixed_resolution') : ''))
+const refreshFieldError = computed(() => (hasFixedRefreshRate.value && !validDisplayRefreshRate(formData.value['display-refresh-rate']) ? t('apps.display_profile_fixed_refresh_rate') : ''))
+const resHintText = computed(() => {
+  if (hasFixedResolution.value) return t('apps.display_profile_fixed_override_hint', { value: formData.value['display-resolution'] })
+  const rule = appResolutionRule.value
+  if (rule === 'no_operation') return t('apps.display_profile_resolution_ignore_hint')
+  if (rule === 'follow_client') return t('apps.display_profile_resolution_follow_hint')
+  return ''
+})
+const rrHintText = computed(() => {
+  if (hasFixedRefreshRate.value) return t('apps.display_profile_fixed_override_hint', { value: `${formData.value['display-refresh-rate']} Hz` })
+  if (appRefreshRateRule.value === 'follow_client') return t('apps.display_profile_refresh_rate_follow_hint')
+  return ''
+})
+// ---- end App Display Profile ----
+
 const isFormValid = computed(() => {
   // name 字段是必填的，必须验证通过
   const nameValid = validation.value.name?.isValid === true
@@ -312,7 +488,7 @@ const isFormValid = computed(() => {
   // cmd 字段不是必填的，如果已验证则使用验证结果，如果未验证或为空则认为有效
   const cmdValid = validation.value.cmd?.isValid !== false  // undefined 或 true 都认为有效
   
-  return nameValid && cmdValid
+  return nameValid && cmdValid && displayProfileValid.value
 })
 
 const showMessage = (message, type = 'info') => {
@@ -373,6 +549,10 @@ const ensureDefaultValues = () => {
   if (isWindows.value && formData.value.gamepad === undefined) {
     formData.value.gamepad = ''
   }
+  for (const key of ['display-target', 'display-device-prep', 'display-resolution-mode', 'display-refresh-rate-mode', 'display-output-name', 'display-resolution', 'display-refresh-rate', 'display-hdr', 'display-disconnect-action', 'display-dynamic-resolution-follow-display']) {
+    if (formData.value[key] === undefined) formData.value[key] = ''
+  }
+
   formData.value.dlssnr = normalizeDlssnrConfig(formData.value.dlssnr)
   const rtxHdr = formData.value['rtx-hdr']
   formData.value['rtx-hdr'] = {
@@ -384,6 +564,7 @@ const ensureDefaultValues = () => {
 const initializeForm = (app) => {
   formData.value = { ...DEFAULT_FORM_DATA, ...deepClone(app) }
   ensureDefaultValues()
+  fixedValuesEnabled.value = Boolean(formData.value['display-resolution']?.trim() || formData.value['display-refresh-rate']?.trim())
   validation.value = {}
   imageError.value = ''
   initialSnapshot.value = JSON.stringify(formData.value)
@@ -604,7 +785,7 @@ const saveApp = async () => {
   }
 
   // the cover fields of the list describe the cover; the host sets them and takes none of them back
-  const editedApp = withoutCoverReport(formData.value)
+  const editedApp = normalizeAppDisplayProfile(withoutCoverReport(formData.value))
   if (!isCoverStyle(editedApp['cover-style'])) delete editedApp['cover-style']
   if (editedApp['image-path']) {
     editedApp['image-path'] = editedApp['image-path'].toString().replace(/"/g, '')
@@ -630,7 +811,7 @@ watch(
 onMounted(() => {
   window.scrollTo(0, 0)
   nextTick(initializeFileSelector)
-  stopConfig = hostData.subscribe('config', (config) => { globalCoverStyle.value = normalizeCoverStyle(config?.generated_cover_style) })
+  stopConfig = hostData.subscribe('config', (config) => { globalCoverStyle.value = normalizeCoverStyle(config?.generated_cover_style); applyDisplayDevices(config) })
 })
 
 // Live validation while typing (the fields have no blur event)
@@ -692,6 +873,11 @@ onBeforeUnmount(() => { stopConfig(); cleanup() })
   box-shadow: 0 2px 10px rgb(0 0 0 / 0.18);
 }
 .apps-savebar__fill { flex: 1; }
+.apps-hint {
+  margin: 0 16px 8px;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 0.875rem;
+}
 /* a narrow pane with long labels (German Abbrechen/Speichern beside a status line): the buttons are nowrap, so the status takes its own row above them instead of the bar pushing out of the pane */
 .apps-savebar .apps-savebar__fill { flex: 0 1 0%; }
 @media (max-width: 599.98px) { .apps-savebar .apps-status { flex: 1 1 100%; } }

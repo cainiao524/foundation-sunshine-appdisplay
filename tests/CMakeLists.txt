@@ -708,6 +708,8 @@ set(CONFIG_RUNTIME_SUPPORT_SOURCES
         ${CMAKE_SOURCE_DIR}/src/streaming/bitrate.cpp
         ${CMAKE_SOURCE_DIR}/src/file_handler.cpp
         ${CMAKE_SOURCE_DIR}/src/display_device/parsed_config.cpp
+        # make_parsed_config calls app_display::hdr_compatible when a per-app profile is set.
+        ${CMAKE_SOURCE_DIR}/src/app_display_profile.cpp
         ${CMAKE_SOURCE_DIR}/src/display_device/to_string.cpp
         ${CMAKE_SOURCE_DIR}/src/hdr/calibration.cpp
         ${CMAKE_SOURCE_DIR}/src/hdr/client_display_capabilities.cpp

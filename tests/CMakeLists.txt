@@ -693,8 +693,10 @@ if (WIN32)
     target_sources(hdr_calibration_unit_tests PRIVATE
             ${CMAKE_SOURCE_DIR}/src/hdr/session_target.cpp
             ${CMAKE_SOURCE_DIR}/tests/tools/test_hdr_session_target.cpp)
+    # session_target.cpp includes rtsp.h, which stores app_display::profile_t by
+    # value and therefore pulls <boost/property_tree/ptree.hpp>.
     target_link_libraries(hdr_calibration_unit_tests PRIVATE sunshine::host_headers sunshine::tls
-          Boost::log Boost::format Boost::process)
+          Boost::log Boost::format Boost::process Boost::property_tree)
     target_compile_definitions(hdr_calibration_unit_tests PRIVATE ${SUNSHINE_DEFINITIONS})
 endif ()
 add_test(NAME hdr_calibration_unit_tests COMMAND hdr_calibration_unit_tests)

@@ -62,7 +62,7 @@ def read_file(ref, path):
 def read_state(ref):
     state = json.loads(read_file(ref, STATE))
     if (state.get("schema") != 1 or
-            not re.fullmatch(r"v[0-9]+\.[0-9]+", state.get("version", "")) or
+            not is_appdisplay_version(state.get("version", ""), state.get("upstream_tag", "")) or
             not re.fullmatch(r"[0-9a-f]{40}", state.get("upstream_sha", ""))):
         raise ValueError("Invalid upstream sync state")
     tag = state.get("upstream_tag", "")
@@ -85,13 +85,39 @@ def upstream_release(tag=None):
     return tag, git("rev-parse", "FETCH_HEAD^{commit}")
 
 
-def next_version(current, tags):
-    major, minor = map(int, current[1:].split("."))
-    for tag in tags:
-        match = re.fullmatch(rf"v{major}\.([0-9]+)", tag)
-        if match:
-            minor = max(minor, int(match[1]))
-    return f"v{major}.{minor + 1}"
+# Fork releases are named after the exact upstream tag (including the 杂鱼
+# suffix AlkaidLab uses) plus "-appdisplay", e.g.
+# v2026.1123.185102.杂鱼 -> v2026.1123.185102.杂鱼-appdisplay.
+APP_DISPLAY_SUFFIX = "-appdisplay"
+
+
+def appdisplay_version(upstream_tag, tags=()):
+    """Return the fork release tag for a synchronized upstream tag.
+
+    If that tag is already used, append .2, .3, ... so a rebuild can be
+    published without clobbering the previous release.
+    """
+    if not upstream_tag or " " in upstream_tag:
+        raise ValueError("Invalid upstream tag")
+    git("check-ref-format", f"refs/tags/{upstream_tag}")
+    base = f"{upstream_tag}{APP_DISPLAY_SUFFIX}"
+    git("check-ref-format", f"refs/tags/{base}")
+    existing = set(tags)
+    if base not in existing:
+        return base
+    n = 2
+    while f"{base}.{n}" in existing:
+        n += 1
+    return f"{base}.{n}"
+
+
+def is_appdisplay_version(version, upstream_tag=""):
+    if not re.fullmatch(rf"v.+{re.escape(APP_DISPLAY_SUFFIX)}(?:\.[1-9][0-9]*)?", version or ""):
+        return False
+    if not upstream_tag:
+        return True
+    expected = f"{upstream_tag}{APP_DISPLAY_SUFFIX}"
+    return version == expected or version.startswith(expected + ".")
 
 
 def output(**values):
@@ -158,8 +184,8 @@ def prepare(repository, check_only=False):
         return
 
     remote_tags = git("ls-remote", "--tags", "--refs", "origin")
-    version = next_version(state["version"], [line.split("refs/tags/", 1)[1]
-                                           for line in remote_tags.splitlines()])
+    version = appdisplay_version(tag, [line.split("refs/tags/", 1)[1]
+                                       for line in remote_tags.splitlines()])
     git("checkout", "--detach", base)
     git("config", "user.name", "github-actions[bot]")
     git("config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")

@@ -365,6 +365,9 @@ jobs:
       release_version: ${{ steps.setup_release_reusable.outputs.release_version || steps.setup_release_auto.outputs.release_version || steps.setup_release_manual.outputs.release_version }}
       release_name: ${{ steps.setup_release_reusable.outputs.release_name }}
       release_prerelease: ${{ steps.setup_release_reusable.outputs.release_prerelease }}
+      # Reusable app-display tags already include the upstream 杂鱼 suffix and -appdisplay.
+      # Date-based master/PR builds still append 杂鱼 the way setup-release-action does.
+      release_build_version: ${{ steps.setup_release_reusable.outputs.release_build_version || format('{0}.杂鱼', steps.setup_release_auto.outputs.release_tag || steps.setup_release_manual.outputs.release_tag) }}
     permissions:
       contents: write  # read does not work to check squash and merge details
     # Pinned: the ubuntu-latest label migrates to Ubuntu 26 (actions/runner-images#14748); move this on purpose, not by label.
@@ -418,6 +421,7 @@ jobs:
             echo "release_version=${VERSION}"
             echo "release_name=${NAME}"
             echo "release_prerelease=${REQUESTED_PRERELEASE:-false}"
+            echo "release_build_version=${TAG}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Setup Release (Auto)
@@ -761,7 +765,7 @@ jobs:
           RTX_VIDEO_NGX_APPLICATION_ID: ${{ (github.repository == 'AlkaidLab/foundation-sunshine' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == 'AlkaidLab/foundation-sunshine')) && secrets.RTX_VIDEO_NGX_APPLICATION_ID || '' }}
           SUNSHINE_RTX_HDR: ${{ !(github.repository == 'AlkaidLab/foundation-sunshine' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == 'AlkaidLab/foundation-sunshine')) && 'OFF' || (github.event_name != 'pull_request' && github.ref == 'refs/heads/master') && 'ON' || inputs.rtx_hdr || 'AUTO' }}
           BRANCH: ${{ github.head_ref || github.ref_name }}
-          BUILD_VERSION: ${{ needs.setup_release.outputs.release_tag }}.杂鱼
+          BUILD_VERSION: ${{ needs.setup_release.outputs.release_build_version }}
           COMMIT: ${{ needs.setup_release.outputs.release_commit }}
           SUNSHINE_BUILD_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
           SUNSHINE_BUILD_BRANCH: ${{ github.head_ref || github.ref_name }}
@@ -1265,7 +1269,7 @@ jobs:
           RTX_VIDEO_NGX_APPLICATION_ID: ${{ (github.repository == 'AlkaidLab/foundation-sunshine' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == 'AlkaidLab/foundation-sunshine')) && secrets.RTX_VIDEO_NGX_APPLICATION_ID || '' }}
           SUNSHINE_RTX_HDR: ${{ !(github.repository == 'AlkaidLab/foundation-sunshine' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == 'AlkaidLab/foundation-sunshine')) && 'OFF' || (github.event_name != 'pull_request' && github.ref == 'refs/heads/master') && 'ON' || inputs.rtx_hdr || 'AUTO' }}
           BRANCH: ${{ github.head_ref || github.ref_name }}
-          BUILD_VERSION: ${{ needs.setup_release.outputs.release_tag }}.杂鱼
+          BUILD_VERSION: ${{ needs.setup_release.outputs.release_build_version }}
           COMMIT: ${{ needs.setup_release.outputs.release_commit }}
           # Build identity (cmake/prep/build_info.cmake): master builds carry the full commit too. A published build is a
           # pre-release (beta); PRs and manual runs are dev builds. One build makes both packages, so the package stays auto.
@@ -1593,7 +1597,7 @@ jobs:
         env:
           RTX_VIDEO_ADAPTER_BUILT: ${{ steps.configure_windows.outputs.rtx_hdr }}
           RTX_VIDEO_ADAPTER_REQUIRED: ${{ github.repository == 'AlkaidLab/foundation-sunshine' && github.event_name != 'pull_request' && github.ref == 'refs/heads/master' }}
-          SYMBOLS_TAG: ${{ needs.setup_release.outputs.release_tag }}.杂鱼
+          SYMBOLS_TAG: ${{ needs.setup_release.outputs.release_build_version }}
           SYMBOLS_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -o pipefail

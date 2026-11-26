@@ -103,7 +103,10 @@ class Publisher:
     def __init__(self, repository: str, tag: str, commit: str, runner=run_command):
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
             raise ReleaseError("Expected repository in owner/name form.")
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", tag) or ".." in tag or tag.endswith((".", ".lock")):
+        # Allow the upstream 杂鱼 suffix plus -appdisplay, but still reject
+        # path separators, ".." and other unsafe ref forms.
+        if (not re.fullmatch(r"[A-Za-z0-9][\w._+-]{0,127}", tag, re.UNICODE)
+                or ".." in tag or "/" in tag or tag.endswith((".", ".lock"))):
             raise ReleaseError("Expected a safe downstream version tag.")
         if not re.fullmatch(r"[0-9a-f]{40}", commit):
             raise ReleaseError("Expected a full lowercase commit SHA.")

@@ -292,3 +292,14 @@ class PublisherTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TagValidationTests(unittest.TestCase):
+    def test_accepts_upstream_tag_plus_appdisplay(self):
+        tag = "v2026.1123.185102.杂鱼-appdisplay"
+        publisher = release.Publisher("owner/repo", tag, COMMIT, lambda *args, **kwargs: None)
+        self.assertEqual(publisher.tag, tag)
+
+    def test_rejects_path_like_tags(self):
+        with self.assertRaises(release.ReleaseError):
+            release.Publisher("owner/repo", "v1/../etc", COMMIT, lambda *args, **kwargs: None)

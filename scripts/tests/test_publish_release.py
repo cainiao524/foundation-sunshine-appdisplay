@@ -252,8 +252,10 @@ class PublisherTests(unittest.TestCase):
     def test_unexpected_extra_file_is_rejected(self):
         (self.artifacts / "Sunshine.Ds5Sidecar.x64.zip").write_bytes(b"MZ leftover sidecar")
         write_checksums(self.artifacts)
-        with self.assertRaisesRegex(release.ReleaseError, "expected files"):
+        with self.assertRaisesRegex(release.ReleaseError, "expected files") as caught:
             self.publish()
+        self.assertIn("Sunshine.Ds5Sidecar.x64.zip", str(caught.exception))
+        self.assertIn(f"Sunshine.{TAG}.WindowsInstaller.exe", str(caught.exception))
         self.assertFalse(self.gh.mutations)
 
     def test_windows_zip_member_separators_are_supported(self):
@@ -303,3 +305,31 @@ class TagValidationTests(unittest.TestCase):
     def test_rejects_path_like_tags(self):
         with self.assertRaises(release.ReleaseError):
             release.Publisher("owner/repo", "v1/../etc", COMMIT, lambda *args, **kwargs: None)
+
+    def test_expected_names_use_the_full_appdisplay_tag(self):
+        tag = "v2026.1123.185102.杂鱼.appdisplay"
+        self.assertEqual(release.expected_names(tag), {
+            f"Sunshine.{tag}.WindowsInstaller.exe",
+            f"Sunshine.{tag}.Portable-x64.zip",
+            f"Sunshine.{tag}.Symbols-x64.zip",
+            "SHA256SUMS.txt",
+            "checksums.json",
+        })
+
+    def test_truncated_date_asset_names_are_reported(self):
+        tag = "v2026.1123.185102.杂鱼.appdisplay"
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            for name in (
+                "Sunshine.v2026.1123.WindowsInstaller.exe",
+                "Sunshine.v2026.1123.Portable-x64.zip",
+                "Sunshine.v2026.1123.Symbols-x64.zip",
+                "SHA256SUMS.txt",
+                "checksums.json",
+            ):
+                (directory / name).write_bytes(b"x")
+            with self.assertRaisesRegex(release.ReleaseError, "expected files") as caught:
+                release.verify_files(directory, tag)
+            message = str(caught.exception)
+            self.assertIn("Sunshine.v2026.1123.WindowsInstaller.exe", message)
+            self.assertIn(f"Sunshine.{tag}.WindowsInstaller.exe", message)

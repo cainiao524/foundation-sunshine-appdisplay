@@ -54,9 +54,12 @@ def verify_files(directory: Path, tag: str) -> dict[str, tuple[int, str]]:
     """Check all packages against both checksum manifests and their embedded pin."""
     names = expected_names(tag)
     entries = list(directory.iterdir())
-    if {entry.name for entry in entries} != names or any(
+    found = {entry.name for entry in entries}
+    if found != names or any(
             entry.is_symlink() or not entry.is_file() for entry in entries):
-        raise ReleaseError("Release directory must contain exactly the expected files.")
+        raise ReleaseError(
+            "Release directory must contain exactly the expected files. "
+            f"expected={sorted(names)} found={sorted(found)}")
     actual = {name: ((directory / name).stat().st_size, sha256(directory / name)) for name in names}
     if any(size <= 0 for size, _ in actual.values()):
         raise ReleaseError("Release assets must not be empty.")

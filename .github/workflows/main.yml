@@ -360,16 +360,16 @@ jobs:
       # and use setup_release_reusable. Do not key that path off github.event_name: a
       # workflow_dispatch wrapper can leak event_name=workflow_dispatch into the callee.
       publish_release: ${{ steps.setup_release_reusable.outputs.publish_release || steps.auto_gate.outputs.publish || steps.setup_release_manual.outputs.publish_release }}
-      release_body: ${{ steps.filter_release_contributors.outputs.release_body || steps.setup_release_auto.outputs.release_body || steps.setup_release_manual.outputs.release_body || steps.setup_release_reusable.outputs.release_body }}
-      release_commit: ${{ steps.setup_release_reusable.outputs.release_commit || steps.setup_release_auto.outputs.release_commit || steps.setup_release_manual.outputs.release_commit }}
-      release_generate_release_notes: ${{ steps.setup_release_auto.outputs.release_generate_release_notes || steps.setup_release_manual.outputs.release_generate_release_notes || steps.setup_release_reusable.outputs.release_generate_release_notes }}
-      release_tag: ${{ steps.setup_release_reusable.outputs.release_tag || steps.setup_release_auto.outputs.release_tag || steps.setup_release_manual.outputs.release_tag }}
-      release_version: ${{ steps.setup_release_reusable.outputs.release_version || steps.setup_release_auto.outputs.release_version || steps.setup_release_manual.outputs.release_version }}
+      release_body: ${{ steps.filter_release_contributors.outputs.release_body || steps.setup_release_auto.outputs.release_body || steps.setup_release_push.outputs.release_body || steps.setup_release_manual.outputs.release_body || steps.setup_release_reusable.outputs.release_body }}
+      release_commit: ${{ steps.setup_release_reusable.outputs.release_commit || steps.setup_release_auto.outputs.release_commit || steps.setup_release_push.outputs.release_commit || steps.setup_release_manual.outputs.release_commit }}
+      release_generate_release_notes: ${{ steps.setup_release_auto.outputs.release_generate_release_notes || steps.setup_release_push.outputs.release_generate_release_notes || steps.setup_release_manual.outputs.release_generate_release_notes || steps.setup_release_reusable.outputs.release_generate_release_notes }}
+      release_tag: ${{ steps.setup_release_reusable.outputs.release_tag || steps.setup_release_auto.outputs.release_tag || steps.setup_release_push.outputs.release_tag || steps.setup_release_manual.outputs.release_tag }}
+      release_version: ${{ steps.setup_release_reusable.outputs.release_version || steps.setup_release_auto.outputs.release_version || steps.setup_release_push.outputs.release_version || steps.setup_release_manual.outputs.release_version }}
       release_name: ${{ steps.setup_release_reusable.outputs.release_name }}
       release_prerelease: ${{ steps.setup_release_reusable.outputs.release_prerelease }}
       # Reusable app-display tags already include the upstream 杂鱼 suffix and .appdisplay.
       # Date-based master/PR builds still append 杂鱼 the way setup-release-action does.
-      release_build_version: ${{ steps.setup_release_reusable.outputs.release_build_version || format('{0}.杂鱼', steps.setup_release_auto.outputs.release_tag || steps.setup_release_manual.outputs.release_tag) }}
+      release_build_version: ${{ steps.setup_release_reusable.outputs.release_build_version || format('{0}.杂鱼', steps.setup_release_auto.outputs.release_tag || steps.setup_release_push.outputs.release_tag || steps.setup_release_manual.outputs.release_tag) }}
     permissions:
       contents: write  # read does not work to check squash and merge details
     # Pinned: the ubuntu-latest label migrates to Ubuntu 26 (actions/runner-images#14748); move this on purpose, not by label.
@@ -426,12 +426,31 @@ jobs:
             echo "release_build_version=${TAG}"
           } >> "$GITHUB_OUTPUT"
 
+      # LizardByte/setup-release-action refuses to run on a push unless the repository allows only squash merges.
+      # This fork keeps merge commits, so a push runs the action only when it may publish (AUTO_PRERELEASE=true);
+      # otherwise "Setup Release (Push build)" computes the same date-based version without the merge-settings check.
       - name: Setup Release (Auto)
         id: setup_release_auto
-        if: (github.event_name == 'push' || github.event_name == 'pull_request') && inputs.release-tag == ''
+        if: (github.event_name == 'pull_request' || (github.event_name == 'push' && vars.AUTO_PRERELEASE == 'true')) && inputs.release-tag == ''
         uses: LizardByte/setup-release-action@v2025.426.225
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Release (Push build)
+        id: setup_release_push
+        if: github.event_name == 'push' && vars.AUTO_PRERELEASE != 'true' && inputs.release-tag == ''
+        env:
+          COMMIT: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/release-info.py --output "$GITHUB_OUTPUT"
+          {
+            echo "publish_release=false"
+            echo "release_body=Push build ($REF_NAME)"
+            echo "release_commit=$COMMIT"
+            echo "release_generate_release_notes=false"
+          } >> "$GITHUB_OUTPUT"
 
       # A push to master builds, tests, packages and uploads the artifacts, but publishes a pre-release only when the repository
       # variable AUTO_PRERELEASE is "true" (unset by default). The version and tag are computed either way: the build identity

@@ -54,6 +54,26 @@ class PublishTest(unittest.TestCase):
         prerelease = step(publish, "Create the pre-release")
         self.assertEqual(prerelease["if"], "inputs.release-tag == ''")
 
+    def test_a_non_publishing_push_skips_the_squash_only_release_action(self):
+        # LizardByte/setup-release-action fails a push unless the repo allows only squash merges (runs 45823917691,
+        # 45819329563). Repo settings stay as they are: a push runs it only when AUTO_PRERELEASE may publish.
+        auto = step(self.setup, "Setup Release (Auto)")
+        self.assertIn("github.event_name == 'push' && vars.AUTO_PRERELEASE == 'true'", auto["if"])
+        self.assertIn("github.event_name == 'pull_request'", auto["if"])
+        push = step(self.setup, "Setup Release (Push build)")
+        self.assertIn("github.event_name == 'push' && vars.AUTO_PRERELEASE != 'true'", push["if"])
+        self.assertIn("inputs.release-tag == ''", push["if"])
+        self.assertNotIn("uses", push)
+        self.assertIn("scripts/ci/release-info.py", push["run"])
+        self.assertIn('echo "publish_release=false"', push["run"])
+        self.assertNotIn("publish_release=true", push["run"])
+        # setup_release_push never feeds publish_release: only the gate, the reusable path and manual runs do
+        self.assertNotIn("setup_release_push", self.setup["outputs"]["publish_release"])
+        for key in ("release_tag", "release_version", "release_commit", "release_body", "release_build_version"):
+            self.assertIn("steps.setup_release_push.outputs.", self.setup["outputs"][key], key)
+        names = [s.get("name") for s in self.setup["steps"]]
+        self.assertLess(names.index("Setup Release (Push build)"), names.index("Automatic pre-releases"))
+
     def test_publish_survives_a_skipped_shard(self):
         # Implicit success() also checks transitive needs; build_win needs the shard job, which the warm path skips.
         publish = self.workflow["jobs"]["publish"]

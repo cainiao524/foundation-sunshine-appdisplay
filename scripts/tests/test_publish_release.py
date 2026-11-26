@@ -296,7 +296,7 @@ if __name__ == "__main__":
 
 class TagValidationTests(unittest.TestCase):
     def test_accepts_upstream_tag_plus_appdisplay(self):
-        tag = "v2026.1123.185102.杂鱼-appdisplay"
+        tag = "v2026.1123.185102.杂鱼.appdisplay"
         publisher = release.Publisher("owner/repo", tag, COMMIT, lambda *args, **kwargs: None)
         self.assertEqual(publisher.tag, tag)
 

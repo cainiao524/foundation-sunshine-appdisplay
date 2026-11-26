@@ -1,6 +1,6 @@
 name: Publish app-display release
 
-# Manual formal release using the upstream-tag-plus--appdisplay name.
+# Manual formal release using the upstream-tag-plus-.appdisplay name.
 # No schedule: publication is always started by hand.
 on:
   workflow_dispatch:

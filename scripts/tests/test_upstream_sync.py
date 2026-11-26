@@ -52,12 +52,12 @@ class UpstreamTransactionTests(unittest.TestCase):
         self.configure(self.work)
         self.raw_git(self.work, "remote", "set-url", "origin", str(self.remote))
         (self.work / ".github/workflows/build.yml").write_text("name: Downstream guarded pipeline\n", encoding="utf-8")
-        self.write_state(self.work, self.old_tag, self.old_sha, f"{self.old_tag}-appdisplay")
+        self.write_state(self.work, self.old_tag, self.old_sha, f"{self.old_tag}.appdisplay")
         (self.work / "custom.txt").write_text("App Display customization\n", encoding="utf-8")
         self.base = self.commit(self.work, "downstream baseline")
         self.raw_git(self.work, "push", "origin", "master")
-        self.raw_git(self.work, "tag", f"{self.old_tag}-appdisplay")
-        self.raw_git(self.work, "push", "origin", f"refs/tags/{self.old_tag}-appdisplay")
+        self.raw_git(self.work, "tag", f"{self.old_tag}.appdisplay")
+        self.raw_git(self.work, "push", "origin", f"refs/tags/{self.old_tag}.appdisplay")
         self.latest = self.old_tag
         self.release_metadata = {}
         self.api_calls = []
@@ -154,7 +154,7 @@ class UpstreamTransactionTests(unittest.TestCase):
 
     def finalize(self, candidate, version=None):
         if version is None:
-            version = f"{self.new_tag}-appdisplay"
+            version = f"{self.new_tag}.appdisplay"
         with redirect_stdout(io.StringIO()):
             sync.finalize(self.repository, candidate, self.base, version)
 
@@ -215,13 +215,13 @@ class UpstreamTransactionTests(unittest.TestCase):
 
     def test_clean_merge_preserves_customization_and_reserves_next_free_version(self):
         self.new_upstream()
-        taken = f"{self.new_tag}-appdisplay"
+        taken = f"{self.new_tag}.appdisplay"
         self.raw_git(self.work, "tag", taken)
         self.raw_git(self.work, "push", "origin", f"refs/tags/{taken}")
         result = self.prepare()
         candidate = self.remote_sha(sync.PENDING)
         state = sync.read_state(candidate)
-        self.assertEqual(state["version"], f"{self.new_tag}-appdisplay.2")
+        self.assertEqual(state["version"], f"{self.new_tag}.appdisplay.2")
         self.assertEqual(state["previous_sha"], self.base)
         self.assertEqual(sync.read_file(candidate, "custom.txt"), "App Display customization")
         self.assertEqual(sync.read_file(candidate, "upstream-new.txt"), "new upstream")
@@ -271,7 +271,7 @@ class UpstreamTransactionTests(unittest.TestCase):
         result = self.prepare()
         self.assertEqual(self.refs(), before_refs)
         self.assertIn(f"source_sha={candidate}", result)
-        self.assertIn(f"version={self.new_tag}-appdisplay", result)
+        self.assertIn(f"version={self.new_tag}.appdisplay", result)
         self.assertFalse(any(path.endswith("/latest") for path in self.api_calls))
 
     def test_published_pending_candidate_skips_rebuild_but_still_needs_finalization(self):
@@ -352,13 +352,14 @@ if __name__ == "__main__":
 class AppDisplayVersionTests(unittest.TestCase):
     def test_names_follow_the_full_upstream_tag_including_zako_suffix(self):
         upstream = "v2026.1123.185102.杂鱼"
-        self.assertEqual(sync.appdisplay_version(upstream), f"{upstream}-appdisplay")
-        self.assertTrue(sync.is_appdisplay_version(f"{upstream}-appdisplay", upstream))
-        self.assertTrue(sync.is_appdisplay_version(f"{upstream}-appdisplay.2", upstream))
+        self.assertEqual(sync.appdisplay_version(upstream), f"{upstream}.appdisplay")
+        self.assertTrue(sync.is_appdisplay_version(f"{upstream}.appdisplay", upstream))
+        self.assertTrue(sync.is_appdisplay_version(f"{upstream}.appdisplay.2", upstream))
         self.assertFalse(sync.is_appdisplay_version("v4.2", upstream))
-        self.assertFalse(sync.is_appdisplay_version(f"{upstream}-appdisplay", "v2026.1125.34136.杂鱼"))
+        self.assertFalse(sync.is_appdisplay_version(f"{upstream}-appdisplay", upstream))
+        self.assertFalse(sync.is_appdisplay_version(f"{upstream}.appdisplay", "v2026.1125.34136.杂鱼"))
 
     def test_occupied_tag_gets_a_numeric_suffix(self):
         upstream = "v2026.1123.185102.杂鱼"
-        base = f"{upstream}-appdisplay"
+        base = f"{upstream}.appdisplay"
         self.assertEqual(sync.appdisplay_version(upstream, [base, f"{base}.2"]), f"{base}.3")

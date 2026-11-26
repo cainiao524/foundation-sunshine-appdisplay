@@ -365,7 +365,7 @@ jobs:
       release_version: ${{ steps.setup_release_reusable.outputs.release_version || steps.setup_release_auto.outputs.release_version || steps.setup_release_manual.outputs.release_version }}
       release_name: ${{ steps.setup_release_reusable.outputs.release_name }}
       release_prerelease: ${{ steps.setup_release_reusable.outputs.release_prerelease }}
-      # Reusable app-display tags already include the upstream 杂鱼 suffix and -appdisplay.
+      # Reusable app-display tags already include the upstream 杂鱼 suffix and .appdisplay.
       # Date-based master/PR builds still append 杂鱼 the way setup-release-action does.
       release_build_version: ${{ steps.setup_release_reusable.outputs.release_build_version || format('{0}.杂鱼', steps.setup_release_auto.outputs.release_tag || steps.setup_release_manual.outputs.release_tag) }}
     permissions:

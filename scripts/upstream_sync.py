@@ -86,9 +86,9 @@ def upstream_release(tag=None):
 
 
 # Fork releases are named after the exact upstream tag (including the 杂鱼
-# suffix AlkaidLab uses) plus "-appdisplay", e.g.
-# v2026.1123.185102.杂鱼 -> v2026.1123.185102.杂鱼-appdisplay.
-APP_DISPLAY_SUFFIX = "-appdisplay"
+# suffix AlkaidLab uses) plus ".appdisplay", e.g.
+# v2026.1123.185102.杂鱼 -> v2026.1123.185102.杂鱼.appdisplay.
+APP_DISPLAY_SUFFIX = ".appdisplay"
 
 
 def appdisplay_version(upstream_tag, tags=()):

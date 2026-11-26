@@ -78,58 +78,58 @@
       </MSection>
 
       <!-- per-app display scheme: server-side profile, same fields as the C++ parser -->
-      <MSection v-if="isWindows" :title="t('apps.display_profile_title')" :text="t('apps.display_profile_policy_desc')">
-        <template #action>
-          <MInfo :text="displayOptionsNote" />
-        </template>
-        <MDisplayCards v-model="appDisplayOutput" :label="t('config.output_name_windows')" :items="displayOutputCards" :primary-label="displayCopy.display.primary" />
-        <MFooter v-if="!displayDevices.length">{{ displayCopy.display.noneFound }}</MFooter>
-        <template v-if="hasForcedDisplayProfile">
-          <MBanner v-if="formData['display-target'] === 'virtual' && formData['display-device-prep'] === 'ensure_only_display'" tone="warning" icon="warning">
-            {{ t('apps.display_profile_exclusive_warning') }}
-          </MBanner>
-          <MPrepSeg v-model="formData['display-device-prep']" :label="t('config.display_device_prep_windows')" :options="topologyOptions" />
-          <MFooter>{{ topologyEffect }}</MFooter>
-          <MExpander :title="t('config.display_device_options_note_windows')">
-            <MFooter>{{ t('config.display_device_options_note_desc_windows') }}</MFooter>
-          </MExpander>
-          <MGroup>
-            <MItem :title="t('apps.display_profile_resolution')" icon="aspect_ratio" stack>
-              <template #control>
-                <MSeg v-model="appResolutionRule" block :label="t('apps.display_profile_resolution')" :options="resolutionRuleOptions" :disabled="hasFixedResolution" />
-              </template>
-            </MItem>
-            <MFooter v-if="resHintText">{{ resHintText }}</MFooter>
-            <MItem :title="t('apps.display_profile_refresh_rate')" icon="speed" stack>
-              <template #control>
-                <MSeg v-model="appRefreshRateRule" block :label="t('apps.display_profile_refresh_rate')" :options="refreshRuleOptions" :disabled="hasFixedRefreshRate" />
-              </template>
-            </MItem>
-            <MFooter v-if="rrHintText">{{ rrHintText }}</MFooter>
-            <MItem :title="t('apps.display_profile_disconnect')" icon="link_off" stack>
-              <template #control>
-                <MSeg v-model="formData['display-disconnect-action']" block :label="t('apps.display_profile_disconnect')" :options="disconnectOptions" />
-              </template>
-            </MItem>
-            <MItem :title="t('apps.display_profile_dynamic_follow')" icon="sync" stack>
-              <template #control>
-                <MSeg v-model="formData['display-dynamic-resolution-follow-display']" block :label="t('apps.display_profile_dynamic_follow')" :options="dynamicFollowOptions" />
-              </template>
-            </MItem>
-          </MGroup>
-          <MExpander v-model:open="advancedOpen" :title="t('apps.display_profile_advanced_title')" :text="t('apps.display_profile_advanced_sub')">
+      <template v-if="isWindows">
+        <MSection :title="t('apps.display_profile_title')" :text="t('apps.display_profile_policy_desc')">
+          <template #action>
+            <MInfo :text="displayOptionsNote" />
+          </template>
+          <MDisplayCards v-model="appDisplayOutput" :label="t('config.output_name_windows')" :items="displayOutputCards" :primary-label="displayCopy.display.primary" />
+          <MFooter v-if="!displayDevices.length">{{ displayCopy.display.noneFound }}</MFooter>
+          <template v-if="hasForcedDisplayProfile">
+            <MBanner v-if="formData['display-target'] === 'virtual' && formData['display-device-prep'] === 'ensure_only_display'" tone="warning" icon="warning">
+              {{ t('apps.display_profile_exclusive_warning') }}
+            </MBanner>
+            <MPrepSeg v-model="formData['display-device-prep']" :label="t('config.display_device_prep_windows')" :options="topologyOptions" />
+            <MFooter>{{ topologyEffect }}</MFooter>
+            <MExpander :title="t('config.display_device_options_note_windows')">
+              <MFooter>{{ t('config.display_device_options_note_desc_windows') }}</MFooter>
+            </MExpander>
             <MGroup>
-              <MSwitchItem v-model="fixedValuesEnabled" :title="t('apps.display_profile_fixed_resolution')" :supporting="t('apps.display_profile_fixed_refresh_rate')" />
-              <template v-if="fixedValuesEnabled">
-                <MFieldItem v-model.trim="formData['display-resolution']" :label="t('apps.display_profile_fixed_resolution')" :supporting="t('apps.display_profile_advanced_res_note')" :error="resolutionFieldError" placeholder="2560x1440" />
-                <MFieldItem v-model.trim="formData['display-refresh-rate']" :label="t('apps.display_profile_fixed_refresh_rate')" :error="refreshFieldError" placeholder="60" />
-              </template>
-              <MChoiceItem v-model="formData['display-hdr']" :title="t('apps.display_profile_fixed_hdr')" :options="hdrOptions" :cancel-label="t('_common.cancel')" />
+              <MItem :title="t('apps.display_profile_resolution')" :text="resHintText" icon="aspect_ratio" stack>
+                <template #control>
+                  <MSeg v-model="appResolutionRule" block :label="t('apps.display_profile_resolution')" :options="resolutionRuleOptions" :disabled="hasFixedResolution" />
+                </template>
+              </MItem>
+              <MItem :title="t('apps.display_profile_refresh_rate')" :text="rrHintText" icon="speed" stack>
+                <template #control>
+                  <MSeg v-model="appRefreshRateRule" block :label="t('apps.display_profile_refresh_rate')" :options="refreshRuleOptions" :disabled="hasFixedRefreshRate" />
+                </template>
+              </MItem>
+              <MItem :title="t('apps.display_profile_disconnect')" icon="link_off" stack>
+                <template #control>
+                  <MSeg v-model="formData['display-disconnect-action']" block :label="t('apps.display_profile_disconnect')" :options="disconnectOptions" />
+                </template>
+              </MItem>
+              <MItem :title="t('apps.display_profile_dynamic_follow')" icon="sync" stack>
+                <template #control>
+                  <MSeg v-model="formData['display-dynamic-resolution-follow-display']" block :label="t('apps.display_profile_dynamic_follow')" :options="dynamicFollowOptions" />
+                </template>
+              </MItem>
             </MGroup>
-            <MFooter>{{ t('apps.display_profile_advanced_hdr_note') }}</MFooter>
-          </MExpander>
-        </template>
-      </MSection>
+          </template>
+        </MSection>
+        <MExpander v-if="hasForcedDisplayProfile" v-model:open="advancedOpen" :title="t('apps.display_profile_advanced_title')" :text="t('apps.display_profile_advanced_sub')">
+          <MGroup>
+            <MSwitchItem v-model="fixedValuesEnabled" :title="t('apps.display_profile_fixed_resolution')" :text="t('apps.display_profile_fixed_refresh_rate')" />
+            <template v-if="fixedValuesEnabled">
+              <MFieldItem v-model.trim="formData['display-resolution']" :label="t('apps.display_profile_fixed_resolution')" :supporting="t('apps.display_profile_advanced_res_note')" :error="resolutionFieldError" placeholder="2560x1440" />
+              <MFieldItem v-model.trim="formData['display-refresh-rate']" :label="t('apps.display_profile_fixed_refresh_rate')" :error="refreshFieldError" placeholder="60" />
+            </template>
+            <MChoiceItem v-model="formData['display-hdr']" :title="t('apps.display_profile_fixed_hdr')" :options="hdrOptions" :cancel-label="t('_common.cancel')" />
+          </MGroup>
+          <MFooter>{{ t('apps.display_profile_advanced_hdr_note') }}</MFooter>
+        </MExpander>
+      </template>
 
       <!-- advanced (expert): shown after the person confirms, or at once when the application already uses one of them -->
       <div v-if="!showAdvanced" class="apps-gate">
@@ -216,7 +216,6 @@ import { nanoid } from 'nanoid'
 import CommandTable from './CommandTable.vue'
 import ImageSelector from './ImageSelector.vue'
 import { MBanner, MButton, MChip, MChoiceItem, MDialog, MDisplayCards, MExpander, MField, MFieldItem, MFooter, MGroup, MIcon, MIconButton, MInfo, MItem, MPage, MPrepSeg, MSection, MSeg, MSwitchItem, displayTreeTexts } from 'foundation-ui/vue'
-import { $tp } from '../platform-i18n'
 import { prepChoices } from '../composables/displayPrep.js'
 import { createFileSelector } from '../utils/fileSelection.js'
 import { apiPostJson } from '../utils/apiFetch.js'
@@ -449,7 +448,7 @@ const topologyOptions = computed(() => {
 const topologyEffect = computed(() => {
   const mode = formData.value?.['display-device-prep']
   if (!mode) return t('apps.display_profile_inherit')
-  return displayCopy.value.prep.effect?.[mode] || $tp(`config.display_device_prep_${mode}_desc`)
+  return displayCopy.value.prep.effect?.[mode] || t(`config.display_device_prep_${mode}_desc_windows`)
 })
 const displayRuleModes = Object.freeze({
   '': 'inherit',
@@ -464,12 +463,12 @@ const displayRuleValue = (mode) => {
 const resolutionRuleOptions = computed(() => [
   { value: 'inherit', label: t('apps.display_profile_inherit') },
   { value: 'no_operation', label: t('apps.display_profile_no_operation') },
-  { value: 'follow_client', label: $tp('config.resolution_change_automatic') },
+  { value: 'follow_client', label: t('apps.display_profile_follow_client') },
 ])
 const refreshRuleOptions = computed(() => [
   { value: 'inherit', label: t('apps.display_profile_inherit') },
   { value: 'no_operation', label: t('apps.display_profile_no_operation') },
-  { value: 'follow_client', label: $tp('config.refresh_rate_change_automatic') },
+  { value: 'follow_client', label: t('apps.display_profile_follow_client') },
 ])
 const hdrOptions = computed(() => [
   { value: '', label: t('apps.display_profile_fixed_hdr_inherit') },
@@ -925,11 +924,6 @@ onBeforeUnmount(() => { stopConfig(); cleanup() })
   box-shadow: 0 2px 10px rgb(0 0 0 / 0.18);
 }
 .apps-savebar__fill { flex: 1; }
-.apps-hint {
-  margin: 0 16px 8px;
-  color: var(--md-sys-color-on-surface-variant);
-  font-size: 0.875rem;
-}
 /* a narrow pane with long labels (German Abbrechen/Speichern beside a status line): the buttons are nowrap, so the status takes its own row above them instead of the bar pushing out of the pane */
 .apps-savebar .apps-savebar__fill { flex: 0 1 0%; }
 @media (max-width: 599.98px) { .apps-savebar .apps-status { flex: 1 1 100%; } }

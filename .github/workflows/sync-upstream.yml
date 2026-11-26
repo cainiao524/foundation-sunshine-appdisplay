@@ -54,9 +54,12 @@ jobs:
   release:
     needs: prepare
     if: needs.prepare.outputs.changed == 'true' && needs.prepare.outputs.needs_build == 'true'
+    # main.yml's "changes" job requests pull-requests: read; the caller must
+    # grant it or the reusable workflow fails at startup with no jobs.
     permissions:
       contents: write
       actions: write
+      pull-requests: read
     uses: ./.github/workflows/main.yml
     with:
       build-version: ${{ needs.prepare.outputs.version }}

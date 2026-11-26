@@ -1846,8 +1846,7 @@ jobs:
         run: |
           # Zero-pad a short vYEAR.DATE tag (e.g. v2026.813 -> v2026.0813).
           # The pattern is anchored: a full official tag such as
-          # v2026.1123.185102.杂鱼.appdisplay must be used as-is, or the
-          # published asset names will not match scripts/publish_release.py.
+          # v2026.1123.185102.杂鱼.appdisplay is not a short date tag.
           TAG="${{ needs.setup_release.outputs.release_tag }}"
           NEWTAG="$TAG"
 
@@ -1857,6 +1856,12 @@ jobs:
             DATE_PADDED=$(printf "%04d" "$DATE_PART")
             NEWTAG="v${YEAR}.${DATE_PADDED}"
           fi
+          # GitHub drops non-ASCII characters from release asset names, so
+          # v2026.1123.185102.杂鱼.appdisplay would be stored under a different
+          # name than the one checked. Name the files with the ASCII form
+          # (v2026.1123.185102.appdisplay); scripts/publish_release.py
+          # asset_file_tag() applies the same rule. The tag keeps 杂鱼.
+          NEWTAG=$(printf '%s' "$NEWTAG" | LC_ALL=C sed -e 's/[^A-Za-z0-9._-]//g' -e 's/\.\.*/./g' -e 's/^\.//' -e 's/\.$//')
 
           # 重命名安装包和便携版
           INSTALLER_NAME="Sunshine.${NEWTAG}.WindowsInstaller.exe"

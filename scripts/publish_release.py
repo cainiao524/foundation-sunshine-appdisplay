@@ -35,10 +35,28 @@ def run_command(args: list[str], *, payload: str | None = None, missing_ok=False
     return result.stdout
 
 
+def asset_file_tag(tag: str) -> str:
+    """The tag as it appears in asset filenames.
+
+    GitHub silently drops non-ASCII characters from release asset names
+    (Sunshine.v2026.1123.185102.杂鱼.appdisplay.Portable-x64.zip is stored as
+    Sunshine.v2026.1123.185102.appdisplay.Portable-x64.zip). Use the ASCII form
+    for filenames so the uploaded names are exactly the expected ones. The tag
+    and release title keep the full upstream name. Must match the
+    "Rename release assets" step in .github/workflows/main.yml.
+    """
+    ascii_tag = re.sub(r"[^A-Za-z0-9._-]", "", tag)
+    ascii_tag = re.sub(r"\.{2,}", ".", ascii_tag).strip(".")
+    if not ascii_tag:
+        raise ReleaseError("Release tag has no ASCII characters for asset names.")
+    return ascii_tag
+
+
 def expected_names(tag: str) -> set[str]:
     # 1123 ships native DualSense; the optional sidecar package is no longer published.
-    return {f"Sunshine.{tag}.WindowsInstaller.exe", f"Sunshine.{tag}.Portable-x64.zip",
-            f"Sunshine.{tag}.Symbols-x64.zip", "SHA256SUMS.txt", "checksums.json"}
+    name = asset_file_tag(tag)
+    return {f"Sunshine.{name}.WindowsInstaller.exe", f"Sunshine.{name}.Portable-x64.zip",
+            f"Sunshine.{name}.Symbols-x64.zip", "SHA256SUMS.txt", "checksums.json"}
 
 
 def sha256(path: Path) -> str:

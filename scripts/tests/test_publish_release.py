@@ -306,12 +306,15 @@ class TagValidationTests(unittest.TestCase):
         with self.assertRaises(release.ReleaseError):
             release.Publisher("owner/repo", "v1/../etc", COMMIT, lambda *args, **kwargs: None)
 
-    def test_expected_names_use_the_full_appdisplay_tag(self):
+    def test_expected_names_use_the_ascii_form_of_the_appdisplay_tag(self):
+        # GitHub drops non-ASCII characters from asset names (run 45819353789).
         tag = "v2026.1123.185102.杂鱼.appdisplay"
+        name = "v2026.1123.185102.appdisplay"
+        self.assertEqual(release.asset_file_tag(tag), name)
         self.assertEqual(release.expected_names(tag), {
-            f"Sunshine.{tag}.WindowsInstaller.exe",
-            f"Sunshine.{tag}.Portable-x64.zip",
-            f"Sunshine.{tag}.Symbols-x64.zip",
+            f"Sunshine.{name}.WindowsInstaller.exe",
+            f"Sunshine.{name}.Portable-x64.zip",
+            f"Sunshine.{name}.Symbols-x64.zip",
             "SHA256SUMS.txt",
             "checksums.json",
         })
@@ -332,4 +335,4 @@ class TagValidationTests(unittest.TestCase):
                 release.verify_files(directory, tag)
             message = str(caught.exception)
             self.assertIn("Sunshine.v2026.1123.WindowsInstaller.exe", message)
-            self.assertIn(f"Sunshine.{tag}.WindowsInstaller.exe", message)
+            self.assertIn("Sunshine.v2026.1123.185102.appdisplay.WindowsInstaller.exe", message)

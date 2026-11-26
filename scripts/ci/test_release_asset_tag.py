@@ -14,9 +14,18 @@ class ReleaseAssetTagTests(unittest.TestCase):
         self.assertEqual(asset_tag("v2026.813"), "v2026.0813")
         self.assertEqual(asset_tag("v2026.1123"), "v2026.1123")
 
-    def test_full_official_appdisplay_tag_is_kept(self):
+    def test_full_official_appdisplay_tag_drops_non_ascii_for_filenames(self):
         tag = "v2026.1123.185102.杂鱼.appdisplay"
-        self.assertEqual(asset_tag(tag), tag)
+        self.assertEqual(asset_tag(tag), "v2026.1123.185102.appdisplay")
+
+    def test_matches_publish_release(self):
+        from scripts.publish_release import asset_file_tag
+        for tag in ("v2026.1123.185102.杂鱼.appdisplay", "v4.3", "v2026.1125.34136.杂鱼.appdisplay.2"):
+            self.assertEqual(asset_tag(tag), asset_file_tag(tag))
+
+    def test_the_workflow_strips_non_ascii_from_asset_names(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("LC_ALL=C sed -e 's/[^A-Za-z0-9._-]//g'", text)
 
     def test_legacy_and_unrelated_tags_are_kept(self):
         self.assertEqual(asset_tag("v4.3"), "v4.3")

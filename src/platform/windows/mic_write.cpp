@@ -8,14 +8,11 @@
 #include <audioclient.h>
 #include <avrt.h>
 #include <cmath>
-#include <filesystem>
 #include <mmdeviceapi.h>
 #include <mutex>
 #include <numbers>
 #include <roapi.h>
 #include <synchapi.h>
-#include <urlmon.h>
-#include <winreg.h>
 
 // Local includes
 #include "mic_write.h"
@@ -23,7 +20,6 @@
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
-#include "src/platform/windows/virtual_device_host/microphone_client.h"
 
 // Must be the last included file
 // clang-format off
@@ -139,8 +135,8 @@ namespace platf::audio {
       // 存储原始音频设备设置
       store_original_audio_settings();
 
-      // 尝试创建或使用虚拟音频设备
-      if (create_virtual_audio_device() != 0) {
+      // 查找已安装的虚拟音频设备；安装由控制面板组件管理负责。
+      if (detect_virtual_audio_device() != 0) {
         BOOST_LOG(warning) << "Virtual audio device not available, microphone redirection may not work";
       }
 
@@ -414,96 +410,9 @@ namespace platf::audio {
     return total_bytes_written;
   }
 
-  mic_redirect_test_result_t
-  test_mic_redirect() {
-    static std::mutex test_mutex;
-    const std::lock_guard lock(test_mutex);
-
-    const auto backend = config::audio.microphone_redirect_backend;
-    if (!try_begin_mic_redirect_test()) {
-      return { false, "MIC_TEST_BUSY", mic_redirect_status().active_backend };
-    }
-    struct test_reservation_t {
-      ~test_reservation_t() {
-        end_mic_redirect_test();
-      }
-    } test_reservation;
-    if (backend == "disabled") {
-      report_mic_redirect_backend({}, "MIC_BACKEND_DISABLED");
-      return { false, "MIC_BACKEND_DISABLED", "disabled" };
-    }
-
-    std::string usbip_fallback_reason;
-    if (backend == "usbip_experimental" || backend == "auto") {
-      auto &client = virtual_device_host::persistent_microphone_client();
-      if (client.start()) {
-        report_mic_redirect_backend("usbip_experimental");
-        constexpr auto sample_rate = 48'000u;
-        constexpr auto frames_per_packet = 480u;
-        constexpr auto packet_count = 100u;
-        std::array<std::int16_t, frames_per_packet> pcm {};
-        for (std::uint32_t packet = 0; packet < packet_count; ++packet) {
-          for (std::uint32_t frame = 0; frame < frames_per_packet; ++frame) {
-            const auto sample = packet * frames_per_packet + frame;
-            pcm[frame] = static_cast<std::int16_t>(
-              std::sin(sample * 2.0 * std::numbers::pi * 440.0 / sample_rate) * 4096.0);
-          }
-          if (client.write_pcm(pcm.data(), pcm.size()) < 0) {
-            report_mic_redirect_backend({}, "MIC_USBIP_WRITE_FAILED");
-            return { false, "MIC_USBIP_WRITE_FAILED", "usbip_experimental" };
-          }
-          Sleep(10);
-        }
-        if (!client.flush()) {
-          report_mic_redirect_backend({}, "MIC_USBIP_FLUSH_FAILED");
-          return { false, "MIC_USBIP_FLUSH_FAILED", "usbip_experimental" };
-        }
-        return { true, {}, "usbip_experimental" };
-      }
-      const auto status = virtual_device_host::microphone_status();
-      usbip_fallback_reason = status.error_code.empty() ?
-                                "MIC_USBIP_DEVICE_UNAVAILABLE" :
-                                status.error_code;
-      if (backend == "usbip_experimental") {
-        report_mic_redirect_backend({}, usbip_fallback_reason);
-        return { false,
-                 usbip_fallback_reason,
-                 "usbip_experimental" };
-      }
-    }
-
-    const auto com_status = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    if (FAILED(com_status) && com_status != RPC_E_CHANGED_MODE) {
-      report_mic_redirect_backend({}, "MIC_TEST_COM_FAILED");
-      return { false, "MIC_TEST_COM_FAILED", "vb_cable" };
-    }
-
-    mic_redirect_test_result_t result;
-    {
-      mic_write_wasapi_t test_device;
-      if (test_device.init(true) != 0) {
-        result.error_code = "MIC_TEST_DEVICE_UNAVAILABLE";
-      }
-      else if (test_device.test_write() <= 0) {
-        result.error_code = "MIC_TEST_WRITE_FAILED";
-      }
-      else {
-        result.success = true;
-      }
-      result.backend = "vb_cable";
-      report_mic_redirect_backend(result.success ? "vb_cable" : "",
-                                  result.success ? usbip_fallback_reason : result.error_code);
-    }
-
-    if (SUCCEEDED(com_status)) {
-      CoUninitialize();
-    }
-    return result;
-  }
-
   int
-  mic_write_wasapi_t::create_virtual_audio_device() {
-    BOOST_LOG(info) << "Attempting to create/use virtual audio device for client mic redirection";
+  mic_write_wasapi_t::detect_virtual_audio_device() {
+    BOOST_LOG(info) << "Checking virtual audio device for client mic redirection";
 
     // 检查VB-Cable虚拟设备
     auto vb_matched = find_device_id({ { match_field_e::adapter_friendly_name, L"VB-Audio Virtual Cable" } });
@@ -513,66 +422,7 @@ namespace platf::audio {
       return 0;  // 设备已存在
     }
 
-    BOOST_LOG(debug) << "VB-Cable not found, attempting to download...";
-
-    // 检查是否已安装VB-Cable驱动程序
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\VB\\VBAudioVAC", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-      RegCloseKey(hKey);
-      BOOST_LOG(info) << "VB-Cable driver is already installed";
-      return -1;  // 已安装但未找到设备，可能是未启用
-    }
-
-    // 检查是否已经下载并解压过（防止重复下载）
-    std::wstring extract_path = std::filesystem::temp_directory_path().wstring() + L"\\VBCABLE_Install";
-    std::wstring installer_path = extract_path + L"\\VBCABLE_Setup_x64.exe";
-    if (std::filesystem::exists(installer_path)) {
-      // 安装程序已存在，只需提示用户安装
-      BOOST_LOG(warning) << "VB-Cable already downloaded to: " << platf::to_utf8(extract_path) << " ; Please run 'VBCABLE_Setup_x64.exe' as administrator to install, then restart Sunshine";
-      return -1;
-    }
-
-    // 下载VB-Cable
-    BOOST_LOG(debug) << "Downloading VB-Cable...";
-
-    // 下载VB-Cable安装程序
-    std::wstring download_url = L"https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack43.zip";
-    std::wstring temp_path = std::filesystem::temp_directory_path().wstring() + L"\\VBCABLE_Driver_Pack43.zip";
-
-    HMODULE urlmon = LoadLibraryW(L"urlmon.dll");
-    if (!urlmon) {
-      BOOST_LOG(warning) << "VB-Cable is required for microphone streaming. Please download from: https://vb-audio.com/Cable/";
-      return -1;
-    }
-
-    auto URLDownloadToFileW_ptr = (decltype(URLDownloadToFileW) *) GetProcAddress(urlmon, "URLDownloadToFileW");
-    if (!URLDownloadToFileW_ptr || URLDownloadToFileW_ptr(nullptr, download_url.c_str(), temp_path.c_str(), 0, nullptr) != S_OK) {
-      BOOST_LOG(warning) << "Failed to download VB-Cable. Please download manually from: https://vb-audio.com/Cable/";
-      FreeLibrary(urlmon);
-      return -1;
-    }
-    FreeLibrary(urlmon);
-
-    // 解压安装包到用户可访问的位置
-    std::error_code ec;
-    std::filesystem::create_directories(extract_path, ec);
-    if (ec && ec != std::errc::file_exists) {
-      BOOST_LOG(error) << "Failed to create extraction directory: " << ec.message();
-      return -1;
-    }
-
-    // 解压VB-Cable
-    BOOST_LOG(debug) << "Extracting VB-Cable...";
-    std::wstring extract_cmd = L"powershell -command \"Expand-Archive -Path '" + temp_path + L"' -DestinationPath '" + extract_path + L"' -Force\"";
-
-    if (_wsystem(extract_cmd.c_str()) != 0) {
-      BOOST_LOG(error) << "Failed to extract VB-Cable installer";
-      return -1;
-    }
-
-    // 引导用户手动安装
-    BOOST_LOG(warning) << "VB-Cable downloaded to: " << platf::to_utf8(extract_path) << " ; Please run 'VBCABLE_Setup_x64.exe' as administrator to install, then restart Sunshine";
-
+    BOOST_LOG(warning) << "VB-Cable is unavailable; manage the component in Sunshine Control Panel";
     return -1;
   }
 

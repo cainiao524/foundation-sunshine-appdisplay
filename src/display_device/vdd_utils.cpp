@@ -3,6 +3,7 @@
 #include "vdd_utils.h"
 
 #include "vdd_ioctl.h"
+#include "src/telemetry/telemetry.h"
 #include "vdd_mode_list.h"
 
 #include <algorithm>
@@ -482,7 +483,8 @@ namespace display_device {
       static const std::unordered_map<std::string, physical_size_t> size_map = {
         { "small", { 13.3f, 7.5f } },  // 小型设备：约6英寸，16:9比例
         { "medium", { 34.5f, 19.4f } },  // 中型设备：约15.6英寸，16:9比例
-        { "large", { 70.8f, 39.8f } }  // 大型设备：约32英寸，16:9比例
+        { "large", { 40.7f, 22.9f } },  // 大型设备：约18.4英寸，16:9比例（1080p下推荐缩放125%）
+        { "huge", { 70.8f, 39.8f } }  // 巨型设备：约32英寸，16:9比例（1080p下推荐缩放100%）
       };
 
       try {
@@ -511,6 +513,7 @@ namespace display_device {
       if (!status.is_usable()) {
         const auto error_code = status.installed ? "VDD_DRIVER_UNAVAILABLE" : "VDD_DRIVER_NOT_INSTALLED";
         BOOST_LOG(error) << error_code << ": ZakoVDD must be installed and healthy before creating a virtual display. Open the Sunshine desktop VDD settings to install or repair it.";
+        telemetry::driver_failed("vdd", "create", error_code);
         return false;
       }
 
@@ -571,9 +574,11 @@ namespace display_device {
           return true;
         case vdd_ioctl::result::failed:
           BOOST_LOG(error) << "创建虚拟显示器失败 (IOCTL)";
+          telemetry::driver_failed("vdd", "create", "VDD_IOCTL_FAILED");
           return false;
         case vdd_ioctl::result::interface_missing:
           BOOST_LOG(error) << "创建虚拟显示器失败: VDD IOCTL interface missing";
+          telemetry::driver_failed("vdd", "create", "VDD_IOCTL_MISSING");
           return false;
       }
       return false;

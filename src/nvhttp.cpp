@@ -8,13 +8,13 @@
 // standard includes
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <limits>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <shared_mutex>
 #include <sstream>
@@ -26,11 +26,12 @@
 
 // lib includes
 #include "src/http/server.h"
-#include <boost/atomic.hpp>
+#include "src/log_text.h"
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/address.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/asio/ssl/context_base.hpp>
+#include <boost/atomic.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/xml_parser.hpp>
@@ -38,24 +39,28 @@
 #include <openssl/ssl.h>
 
 // local includes
+#include "ai/http_stream.h"
+#include "ai/proxy.h"
+#include "build_info.h"
 #include "client_fingerprint.h"
+#include "client_interface.h"
 #include "config.h"
 #include "confighttp.h"
-#include "ai/proxy.h"
-#include "ai/http_stream.h"
-#include "display_device/session.h"
 #include "display_device/parsed_config.h"
+#include "display_device/session.h"
 #include "display_device/vdd_capability.h"
 #include "file_handler.h"
 #include "file_mapping/file_mapping_http.h"
 #include "file_mapping/service.h"
 #include "globals.h"
 #include "hdr/session_target.h"
-#include "image_enhancement/nr_defaults.h"
 #include "http_util.h"
 #include "httpcommon.h"
+#include "image_enhancement/nr_defaults.h"
+#include "launch_splash/launch_splash.h"
 #include "logging.h"
 #include "network.h"
+#include "network_reachability.h"
 #include "nvhttp.h"
 #include "nvhttp/abr_api.h"
 #include "nvhttp/ai_api.h"
@@ -73,7 +78,9 @@
 #include "process.h"
 #include "remote_usb/reverse_tunnel_service.h"
 #include "rtsp.h"
+#include "startup_gate.h"
 #include "stream.h"
+#include "touch_keyboard_session.h"
 #include "tray/system_tray.h"
 #include "utility.h"
 #include "uuid.h"
@@ -94,7 +101,7 @@ namespace nvhttp {
     "/favicon.ico", "/favicon.png", "/favicon.svg"
   };
 
-  boost::atomic<uint32_t> session_id_counter {0};
+  boost::atomic<uint32_t> session_id_counter { 0 };
   using https_server_t = web::Server<SunshineHTTPS>;
   using http_server_t = web::Server<web::HTTP>;
 
@@ -128,6 +135,50 @@ namespace nvhttp {
     const auto it = args.find(name);
     return it == args.end() ? std::nullopt : std::make_optional<std::string_view>(it->second);
   }
+
+  client_family::observation_t
+  make_family_observation(const args_t &args, const args_t &headers) {
+    client_family::observation_t observation;
+    observation.now = client_family::unix_now();
+    for (const auto &[name, value] : headers) {
+      client_family::add_header(observation, name, value);
+    }
+    for (const auto &[name, value] : args) {
+      client_family::add_query(observation, name, value);
+    }
+    return observation;
+  }
+
+  // VoidLink is the phone and tablet client: when the request does not say whether the client is a touch device,
+  // this family answers for Sparxie's automatic Endfield input (SUNSHINE_CLIENT_TOUCH).
+  bool
+  request_is_touch_family(const args_t &args, const args_t &headers) {
+    return client_family::identify(make_family_observation(args, headers)).family == client_family::family_e::voidlink;
+  }
+
+  // /launch and /resume carry no device name in the standard exchange, so a session that came without one takes the
+  // name stored with the paired certificate that authenticated it.
+  void
+  resolve_session_client_name(rtsp_stream::launch_session_t &session) {
+    if (session.client_cert_uuid.empty()) {
+      return;
+    }
+    const auto paired = find_paired_client(session.client_cert_uuid);
+    session.client_name = client_family::session_client_name(session.client_name, paired ? std::string_view { paired->name } : std::string_view {});
+  }
+
+#ifdef _WIN32
+  int
+  prepare_touch_keyboard(rtsp_stream::launch_session_t &session) {
+    int intent = session.touch_keyboard;
+    if (intent < 0 && config::get_client_touch_keyboard_enabled(session.client_cert_uuid)) {
+      intent = 1;
+    }
+    const bool touch_client = intent == 1 || (session.touch_keyboard < 0 && session.touch_family);
+    session.env["SUNSHINE_CLIENT_TOUCH"] = touch_client ? "true" : "false";
+    return intent;
+  }
+#endif
 
   std::shared_ptr<rtsp_stream::launch_session_t>
   make_launch_session(bool host_audio, const args_t &args) {
@@ -168,7 +219,6 @@ namespace nvhttp {
     }
     if (const auto defaults = image_enhancement::load_nr_defaults()) {
       const auto &f = defaults->filter;
-      launch_session->dlssnr_params.enabled = defaults->enabled;
       launch_session->dlssnr_params.intensity = f.nr_intensity;
       launch_session->dlssnr_params.style = f.nr_style;
       launch_session->dlssnr_params.skin_structure_strength = f.nr_skin_structure_strength;
@@ -177,21 +227,18 @@ namespace nvhttp {
       launch_session->dlssnr_params.motion_quality = f.nr_motion_quality;
       launch_session->dlssnr_scale_percent = f.nr_scale_percent;
     }
-    // Explicit per-app on/off settings take precedence; inherit uses the saved
-    // stream defaults. The overlay processing scale is currently global.
-    if (const auto app_dlssnr = proc::proc.get_app_dlssnr_config(launch_session->appid)) {
-      launch_session->dlssnr_params = *app_dlssnr;
-    }
+    const auto app_nr = proc::proc.get_app_dlssnr_config(launch_session->appid);
+    if (app_nr) launch_session->dlssnr_params = *app_nr;
+    // App Off opts out. Both Auto and On require the global switch, including on resume.
+    launch_session->dlssnr_params.enabled = !app_nr || app_nr->enabled;
     if (launch_session->dlssnr_params.enabled) {
-      // Reserve both enabled backends until RTSP knows the final wire format.
-      // It selects RTX HDR only for PQ and releases the unused backend;
-      // HLG/SDR must retain NR even when launch initially requested RTX HDR.
       launch_session->dlssnr_backend = image_enhancement::manager().acquire_selected(image_enhancement::backend_capability_e::nr);
     }
     launch_session->use_vdd = util::from_view(get_arg(args, "useVdd", "0"));
     launch_session->custom_screen_mode = util::from_view(get_arg(args, "customScreenMode", "-1"));
     // Client-declared touch-keyboard intent (Sunshine protocol extension).
-    // -1 undeclared: fall back to the per-client server profile.
+    // -1 undeclared: fall back to the per-client server profile; 0 and 1
+    // request that the GUI suppress or enable auto-invoke for the session.
     launch_session->touch_keyboard = util::from_view(get_arg(args, "touchKeyboard", "-1"));
     // Client-declared controller emulation type (Sunshine protocol extension
     // carried on the /launch and /resume query string). Values outside the
@@ -294,8 +341,8 @@ namespace nvhttp {
 
   bool
   register_launch_ticket(pt::ptree &tree,
-                         const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session,
-                         std::string_view result_node) {
+    const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session,
+    std::string_view result_node) {
     const auto result = rtsp_stream::launch_session_raise(launch_session);
     if (result == rtsp_stream::launch_ticket_register_e::denied) {
       tree.put("root.<xmlattr>.status_code", 403);
@@ -311,11 +358,11 @@ namespace nvhttp {
     const auto busy = result == rtsp_stream::launch_ticket_register_e::client_busy;
     tree.put("root.<xmlattr>.status_code", busy ? 409 : 503);
     tree.put("root.<xmlattr>.status_message",
-             busy ? "A streaming handshake is already in progress for this client" :
-                    "The host has no capacity for another pending streaming handshake");
+      busy ? "A streaming handshake is already in progress for this client" :
+             "The host has no capacity for another pending streaming handshake");
     tree.put(std::string { "root." } + std::string { result_node }, 0);
     BOOST_LOG(warning) << "Unable to register RTSP launch ticket for client "sv
-                       << launch_session->client_name << ": result="sv << static_cast<int>(result);
+                       << logging::quoted_name(launch_session->client_name) << ": result="sv << static_cast<int>(result);
     return false;
   }
 
@@ -389,8 +436,7 @@ namespace nvhttp {
         ", PARAMS: "sv,
         query_params,
         safe_query_parameters,
-        "&"sv
-      );
+        "&"sv);
     }
     BOOST_LOG(debug) << log_stream.str();
   }
@@ -435,6 +481,30 @@ namespace nvhttp {
   serverinfo(std::shared_ptr<typename web::ServerBase<T>::Response> response, std::shared_ptr<typename web::ServerBase<T>::Request> request) {
     print_req<T>(request);
 
+    // the codec support below is what the encoder probe found: the probe is still running for a short time after the port opens
+    if (!startup::probe_gate().wait_for(startup::request_wait_bound)) {
+      pt::ptree starting;
+      starting.put("root.<xmlattr>.status_code", 503);
+      starting.put("root.<xmlattr>.status_message", startup::starting_message());
+      std::ostringstream data;
+      pt::write_xml(data, starting);
+      response->write(data.str());
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    // A paired serverinfo poll may carry the same user agent as pairing. Use
+    // it to enrich the family record without moving last_seen; only an
+    // actual family/version/OS change is persisted.
+    if constexpr (std::is_same_v<SunshineHTTPS, T>) {
+      const auto client_uuid = request->client_uuid;
+      if (!client_uuid.empty()) {
+        auto observation = make_family_observation(request->parse_query_string(), request->header);
+        observation.now = 0;
+        observe_client_family(client_uuid, observation);
+      }
+    }
+
     int pair_status = 0;
     if constexpr (std::is_same_v<SunshineHTTPS, T>) {
       auto args = request->parse_query_string();
@@ -454,7 +524,7 @@ namespace nvhttp {
 
     tree.put("root.appversion", VERSION);
     tree.put("root.GfeVersion", GFE_VERSION);
-    tree.put("root.SunshineVersion", SUNSHINE_VERSION);
+    tree.put("root.SunshineVersion", std::string { build_info::product_name() } + " " + build_info::version());
     tree.put("root.uniqueid", http::unique_id);
     tree.put("root.HttpsPort", net::map_port(PORT_HTTPS));
     tree.put("root.ExternalPort", net::map_port(PORT_HTTP));
@@ -514,13 +584,12 @@ namespace nvhttp {
       }
     }
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);
-
     auto current_appid = proc::proc.running();
     tree.put("root.PairStatus", pair_status);
     tree.put("root.currentgame", current_appid);
     tree.put("root.state", current_appid > 0 ? "SUNSHINE_SERVER_BUSY" : "SUNSHINE_SERVER_FREE");
     tree.put("root.appListEtag", proc::proc.get_apps_etag());
-
+    client_interface::append_serverinfo(tree, pair_status == 1);
     // AI capability: inform client if AI proxy is available
     tree.put("root.AiCapability", ai::isAiEnabled() ? 1 : 0);
 
@@ -542,6 +611,7 @@ namespace nvhttp {
 
     print_request_ip<SunshineHTTPS>(request, "Launch request");
 
+    const auto launch_begin = std::chrono::steady_clock::now();
     pt::ptree tree;
     bool need_to_restore_display_state { false };
     auto g = util::fail_guard([&]() {
@@ -559,6 +629,13 @@ namespace nvhttp {
         display_device::session_t::get().restore_state();
       }
     });
+
+    // a stream needs the encoder probe and the input devices; both finish within seconds of the start
+    if (!startup::await_stream_ready()) {
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", startup::starting_message());
+      return;
+    }
 
     auto args = request->parse_query_string();
     if (
@@ -594,6 +671,20 @@ namespace nvhttp {
       return;
     }
 
+    // The launch is accepted: the Panel hears about it now, before the display and encoder setup (seconds), so its window is ready when the display is.
+    // Whatever ends this request without the app taking the announcement over withdraws it.
+    bool splash_announced = false;
+    if (appid > 0) {
+      const auto &apps = proc::proc.get_apps();
+      const auto app = std::find_if(apps.begin(), apps.end(), [&](const auto &candidate) { return candidate.id == std::to_string(appid); });
+      splash_announced = app != apps.end() && launch_splash::announce(*app);
+    }
+    auto withdraw_splash = util::fail_guard([&]() {
+      if (splash_announced) {
+        launch_splash::cancel_announced();
+      }
+    });
+
     host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     const auto launch_session = make_launch_session(host_audio, args);
     if (!launch_session) {
@@ -612,17 +703,23 @@ namespace nvhttp {
     if (!client_cert_uuid.empty()) {
       launch_session->client_cert_uuid = client_cert_uuid;
       launch_session->env["SUNSHINE_CLIENT_CERT_UUID"] = client_cert_uuid;
+      resolve_session_client_name(*launch_session);
+      observe_client_family(client_cert_uuid, make_family_observation(args, request->header));
     }
     // Apply the server-side per-app display scheme (if any) after the client
     // parameters are parsed but before HDR target resolution, so the profile
     // overrides (use_vdd / enable_hdr) are what resolve_session_target and the
     // VDD HDR calibration see.
     proc::proc.apply_app_display_profile(appid, *launch_session);
+    launch_session->touch_family = request_is_touch_family(args, request->header);
+#ifdef _WIN32
+    const auto touch_keyboard_intent = prepare_touch_keyboard(*launch_session);
+#endif
     hdr::resolve_session_target(*launch_session);
     if (launch_session->highly_suspected_unknown_client) {
       BOOST_LOG(warning) << "Launch request highly resembles a known unauthorized client fork"
                          << " [client_uuid=" << client_cert_uuid
-                         << ", client_name=" << launch_session->client_name
+                         << ", client_name=" << logging::quoted_name(launch_session->client_name)
                          << ", rule_id=" << fingerprint_match.rule_id
                          << ", rule_revision=" << fingerprint_match.revision
                          << ", rule_source=" << fingerprint_match.source << ']';
@@ -641,6 +738,10 @@ namespace nvhttp {
         return;
       }
     }
+    const auto launch_prepared = std::chrono::steady_clock::now();
+    if (splash_announced) {
+      launch_splash::display_ready();
+    }
 
     auto encryption_mode = net::encryption_mode_for_address(request->remote_endpoint().address());
     if (!launch_session->rtsp_cipher && encryption_mode == config::ENCRYPTION_MODE_MANDATORY) {
@@ -654,6 +755,7 @@ namespace nvhttp {
     }
 
 #ifdef _WIN32
+    launch_session->touch_keyboard_lease = touch_kb::acquire(touch_keyboard_intent);
     if (display_device::resolve_display_intent(config::video, *launch_session).target ==
         display_device::display_intent_t::target_e::vdd) {
       launch_session->nvidia_vsync_lease = nvprefs_instance.acquire_vsync();
@@ -671,6 +773,15 @@ namespace nvhttp {
       }
     }
 
+    {
+      const auto launch_started = std::chrono::steady_clock::now();
+      const auto millis = [](std::chrono::steady_clock::duration d) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
+      };
+      BOOST_LOG(info) << "Launch timing: display and encoder setup "sv << millis(launch_prepared - launch_begin)
+                      << " ms, application start "sv << millis(launch_started - launch_prepared)
+                      << " ms, total before the answer "sv << millis(launch_started - launch_begin) << " ms"sv;
+    }
     if (!register_launch_ticket(tree, launch_session, "gamesession")) {
       // The application was started solely for this launch request. Roll it
       // back if the bounded ticket registry cannot publish the handshake.
@@ -686,6 +797,10 @@ namespace nvhttp {
                                    std::to_string(net::map_port(rtsp_stream::RTSP_SETUP_PORT)));
     tree.put("root.gamesession", 1);
 
+    reachability::observe_client(
+      net::addr_to_normalized_string(request->remote_endpoint().address()),
+      reachability::now_epoch_seconds());
+
     try {
       std::map<std::string, std::string> extra_data {
         { "resolution", std::to_string(launch_session->width) + "x" + std::to_string(launch_session->height) },
@@ -695,8 +810,7 @@ namespace nvhttp {
       if (launch_session->highly_suspected_unknown_client) {
         extra_data.emplace(
           "client_integrity_warning",
-          client_fingerprint::suspicious_client_code
-        );
+          client_fingerprint::suspicious_client_code);
       }
       webhook::send_event_async(webhook::event_t {
         .type = webhook::event_type_t::NV_APP_LAUNCH,
@@ -747,6 +861,12 @@ namespace nvhttp {
       }
     });
 
+    if (!startup::await_stream_ready()) {
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", startup::starting_message());
+      return;
+    }
+
     auto current_appid = proc::proc.running();
     if (current_appid == 0) {
       tree.put("root.resume", 0);
@@ -778,9 +898,21 @@ namespace nvhttp {
     // Newer Moonlight clients send localAudioPlayMode on /resume too,
     // so we should use it if it's present in the args and there are
     // no active sessions we could be interfering with.
-    const bool no_active_sessions { rtsp_stream::session_count() == 0 };
+    // A session whose ticket is published but whose RTSP handshake is not done yet (or whose launch is still being
+    // prepared) is not in session_count() yet, but it owns the display: preparing it again here destroys the virtual display
+    // that client is about to capture (a second client's resume did exactly that on 2026-11-12 15:10).
+    const bool session_starting { rtsp_stream::session_starting_or_active() && rtsp_stream::session_count() == 0 };
+    const bool no_active_sessions { rtsp_stream::session_count() == 0 && !session_starting };
+    if (session_starting) {
+      BOOST_LOG(info) << "Resume while another session is starting: keeping its display and encoder setup"sv;
+    }
     if (no_active_sessions && args.find("localAudioPlayMode"s) != std::end(args)) {
       host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
+    }
+    // Resume requests need not include an appid. Resolve per-app enhancement
+    // settings against the running app rather than treating it as Auto.
+    if (args.find("appid"s) == std::end(args)) {
+      args.emplace("appid", std::to_string(current_appid));
     }
     const auto launch_session = make_launch_session(host_audio, args);
     if (!launch_session) {
@@ -803,15 +935,21 @@ namespace nvhttp {
     if (!client_cert_uuid.empty()) {
       launch_session->client_cert_uuid = client_cert_uuid;
       launch_session->env["SUNSHINE_CLIENT_CERT_UUID"] = client_cert_uuid;
+      resolve_session_client_name(*launch_session);
+      observe_client_family(client_cert_uuid, make_family_observation(args, request->header));
     }
     // Keep the server-side per-app display scheme applied on resume too,
     // before HDR target resolution so the profile overrides are honored.
     proc::proc.apply_app_display_profile(current_appid, *launch_session);
+    launch_session->touch_family = request_is_touch_family(args, request->header);
+#ifdef _WIN32
+    const auto touch_keyboard_intent = prepare_touch_keyboard(*launch_session);
+#endif
     hdr::resolve_session_target(*launch_session);
     if (launch_session->highly_suspected_unknown_client) {
       BOOST_LOG(warning) << "Resume request highly resembles a known unauthorized client fork"
                          << " [client_uuid=" << client_cert_uuid
-                         << ", client_name=" << launch_session->client_name
+                         << ", client_name=" << logging::quoted_name(launch_session->client_name)
                          << ", rule_id=" << fingerprint_match.rule_id
                          << ", rule_revision=" << fingerprint_match.revision
                          << ", rule_source=" << fingerprint_match.source << ']';
@@ -839,6 +977,7 @@ namespace nvhttp {
     }
 
 #ifdef _WIN32
+    launch_session->touch_keyboard_lease = touch_kb::acquire(touch_keyboard_intent);
     if (display_device::resolve_display_intent(config::video, *launch_session).target ==
         display_device::display_intent_t::target_e::vdd) {
       launch_session->nvidia_vsync_lease = nvprefs_instance.acquire_vsync();
@@ -854,6 +993,19 @@ namespace nvhttp {
                                    net::addr_to_url_escaped_string(request->local_endpoint().address()) + ':' +
                                    std::to_string(net::map_port(rtsp_stream::RTSP_SETUP_PORT)));
     tree.put("root.resume", 1);
+    // The app already runs. The Panel shows the launch splash only if the game's window is still missing a moment after this.
+    if (const auto running_app = proc::proc.running(); running_app > 0 && !proc::proc.get_app_cmd(running_app).empty()) {
+      const auto &apps = proc::proc.get_apps();
+      const auto app = std::find_if(apps.begin(), apps.end(), [&](const auto &candidate) { return candidate.id == std::to_string(running_app); });
+      if (app != apps.end() && launch_splash::begin(*app, launch_splash::kind_e::resume)) {
+        if (const auto pid = proc::proc.get_running_pid()) {
+          launch_splash::note_started(static_cast<std::uint32_t>(*pid), true);
+        }
+      }
+    }
+    reachability::observe_client(
+      net::addr_to_normalized_string(request->remote_endpoint().address()),
+      reachability::now_epoch_seconds());
     need_to_restore_display_state = false;
 
     try {
@@ -866,8 +1018,7 @@ namespace nvhttp {
       if (launch_session->highly_suspected_unknown_client) {
         extra_data.emplace(
           "client_integrity_warning",
-          client_fingerprint::suspicious_client_code
-        );
+          client_fingerprint::suspicious_client_code);
       }
       webhook::send_event_async(webhook::event_t {
         .type = webhook::event_type_t::NV_APP_RESUME,
@@ -952,7 +1103,6 @@ namespace nvhttp {
     response->close_connection_after_response = true;
   }
 
-
   void
   setup(const std::string &pkey, const std::string &cert) {
     pairing::set_credentials(pkey, cert);
@@ -1022,8 +1172,7 @@ namespace nvhttp {
         tunnel_config.bind_address = bind_address.empty() ? "0.0.0.0" : bind_address;
         // Resolve after the main port has been parsed. Its validated range
         // reserves +21 for RTSP, so +7 cannot overflow a uint16_t.
-        tunnel_config.port = config::nvhttp.usb_forwarding_port != 0
-          ? config::nvhttp.usb_forwarding_port : net::map_port(7);
+        tunnel_config.port = config::nvhttp.usb_forwarding_port != 0 ? config::nvhttp.usb_forwarding_port : net::map_port(7);
         tunnel_config.session_token = usb_forwarding_token;
         tunnel_config.certificate_file = config::nvhttp.cert;
         tunnel_config.private_key_file = config::nvhttp.pkey;
@@ -1033,8 +1182,8 @@ namespace nvhttp {
         // Optional USB forwarding must never claim a core TCP listener first.
         const auto tunnel_port = tunnel_config.port;
         const bool reserved_port = tunnel_port == port_http || tunnel_port == port_https ||
-          tunnel_port == net::map_port(confighttp::PORT_HTTPS) ||
-          tunnel_port == net::map_port(rtsp_stream::RTSP_SETUP_PORT);
+                                   tunnel_port == net::map_port(confighttp::PORT_HTTPS) ||
+                                   tunnel_port == net::map_port(rtsp_stream::RTSP_SETUP_PORT);
         if (!reserved_port) {
           usb_forwarding_available = reverse_tunnel_service.start(std::move(tunnel_config));
         }
@@ -1127,7 +1276,8 @@ namespace nvhttp {
           { "enabled", config::nvhttp.usb_forwarding_enabled },
           { "available", usb_forwarding_available },
           { "reason", !config::nvhttp.usb_forwarding_enabled ? "disabled" :
-                        usb_forwarding_available ? "ready" : "unavailable" },
+                      usb_forwarding_available               ? "ready" :
+                                                               "unavailable" },
         };
         if (usb_forwarding_available) {
           body["port"] = reverse_tunnel_service.bound_port();
@@ -1231,6 +1381,14 @@ namespace nvhttp {
         shutdown_event->raise(true);
         return;
       }
+      catch (const std::exception &err) {
+        if (shutdown_event->peek()) {
+          return;
+        }
+        BOOST_LOG(fatal) << "nvhttps server stopped on ports ["sv << server->config.port << "]: "sv << err.what();
+        shutdown_event->raise(true);
+        return;
+      }
     };
 
     auto accept_and_run_http = [&](nvhttp::http_server_t *server) {
@@ -1245,6 +1403,14 @@ namespace nvhttp {
         }
 
         BOOST_LOG(fatal) << "Couldn't start nvhttp server on ports ["sv << server->config.port << "]: "sv << err.what();
+        shutdown_event->raise(true);
+        return;
+      }
+      catch (const std::exception &err) {
+        if (shutdown_event->peek()) {
+          return;
+        }
+        BOOST_LOG(fatal) << "nvhttp server stopped on ports ["sv << server->config.port << "]: "sv << err.what();
         shutdown_event->raise(true);
         return;
       }

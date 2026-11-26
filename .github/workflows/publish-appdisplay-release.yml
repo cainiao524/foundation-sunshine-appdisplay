@@ -1,0 +1,83 @@
+name: Publish app-display release
+
+# Manual formal release using the upstream-tag-plus--appdisplay name.
+# No schedule: publication is always started by hand.
+on:
+  workflow_dispatch:
+    inputs:
+      source-ref:
+        description: 'Branch, tag, or commit to build and publish'
+        required: true
+        default: 'master'
+      prerelease:
+        description: 'Mark as pre-release (leave unchecked for the latest official release)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-appdisplay-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.repository == 'cainiao524/foundation-sunshine-appdisplay'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.names.outputs.sha }}
+      version: ${{ steps.names.outputs.version }}
+      name: ${{ steps.names.outputs.name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source-ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Resolve app-display release names from the upstream pin
+        id: names
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "scripts")
+          import upstream_sync as sync
+
+          tag = Path(".github/upstream-stable-release").read_text(encoding="utf-8").strip()
+          pinned = Path(".github/upstream-stable-commit").read_text(encoding="utf-8").strip()
+          state = sync.read_state("HEAD")
+          if state["upstream_tag"] != tag or state["upstream_sha"] != pinned:
+              raise SystemExit("Upstream pins disagree with sync state")
+          if not sync.is_ancestor(pinned, "HEAD"):
+              raise SystemExit(f"Pinned upstream commit {pinned} is not in this revision")
+          version = state["version"]
+          expected = sync.appdisplay_version(tag)
+          if not version.startswith(expected):
+              raise SystemExit(f"State version {version} does not belong to upstream {tag}")
+          sha = sync.git("rev-parse", "HEAD^{commit}")
+          name = f"Sunshine App Display Profile {version}"
+          lines = [f"sha={sha}", f"version={version}", f"name={name}"]
+          print("\n".join(lines))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write("\n".join(lines) + "\n")
+          PY
+
+  release:
+    needs: prepare
+    permissions:
+      contents: write
+      actions: write
+    uses: ./.github/workflows/main.yml
+    with:
+      build-version: ${{ needs.prepare.outputs.version }}
+      release-tag: ${{ needs.prepare.outputs.version }}
+      release-name: ${{ needs.prepare.outputs.name }}
+      source-ref: ${{ needs.prepare.outputs.sha }}
+      publish-release: true
+      prerelease: ${{ inputs.prerelease }}

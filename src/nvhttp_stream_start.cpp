@@ -19,7 +19,7 @@
 #include "display_device/vdd_capability.h"
 #include "hdr/session_target.h"
 #include "logging.h"
-#include "touch_keyboard_session.h"
+#include "telemetry/telemetry.h"
 #include "video.h"
 
 #include <algorithm>
@@ -73,10 +73,13 @@ namespace nvhttp::stream_start {
       explicit temporary_video_config_t(config::video_t replacement):
           original_config { config::video } {
         config::video = std::move(replacement);
+        // A probe made with the replacement options must not be reused by a launch with the real ones, nor the other way round.
+        video::forget_encoder_probe_result();
       }
 
       ~temporary_video_config_t() {
         config::video = std::move(original_config);
+        video::forget_encoder_probe_result();
       }
 
       temporary_video_config_t(const temporary_video_config_t &) = delete;
@@ -231,8 +234,6 @@ namespace nvhttp::stream_start {
           recovery_result.detail = "Display configuration failed during a deferred retry.";
           return false;
         }
-
-        hdr::adopt_vdd_calibration_if_needed(launch_session);
 
         const auto target = refresh_vdd_probe_target ? make_vdd_probe_target() : probe_target;
         const auto probe_result = video::probe_encoders(target);
@@ -396,6 +397,7 @@ namespace nvhttp::stream_start {
       recovery_session.host_audio = launch_session.host_audio;
       recovery_session.unique_id = launch_session.unique_id;
       recovery_session.client_name = launch_session.client_name;
+      recovery_session.client_cert_uuid = launch_session.client_cert_uuid;
       recovery_session.width = launch_session.width;
       recovery_session.height = launch_session.height;
       recovery_session.fps = launch_session.fps;
@@ -487,6 +489,7 @@ namespace nvhttp::stream_start {
       const auto original_probe_result = video::last_encoder_probe_result;
       rtsp_stream::launch_session_t recovery_session {};
       fill_vdd_recovery_session(recovery_session, launch_session);
+      hdr::resolve_session_target(recovery_session);
 
       display_result = display_device::session_t::get().configure_display(config::video, recovery_session, is_reconfigure);
       if (display_result.result == display_device::session_t::configure_result_t::result_e::deferred_retry) {
@@ -531,7 +534,6 @@ namespace nvhttp::stream_start {
         recovery_result.detail = "VDD-backed display recovery was attempted, but the VDD display configuration failed.";
         return false;
       }
-      hdr::adopt_vdd_calibration_if_needed(recovery_session);
 
       if (!video::probe_encoders(make_vdd_probe_target())) {
         commit_vdd_recovery_to_launch_session(launch_session, recovery_session);
@@ -674,6 +676,17 @@ namespace nvhttp::stream_start {
     tree.put("root.sunshine_error_source", source);
     tree.put("root.sunshine_error_stage", stage);
     tree.put("root.sunshine_recoverable", recoverable ? 1 : 0);
+
+    // Every launch that is refused passes here with a stable code: the one place that says where a stream start failed (statistics: fixed words and the code, no text)
+    try {
+      const char *failed_stage = error_code.rfind("VDD_", 0) == 0 ? "vdd_create" :
+                                 source == "display"             ? "display_prepare" :
+                                 source == "video"               ? "encoder_init" :
+                                                                   "launch_accept";
+      telemetry::stream_failed(failed_stage, error_code);
+    }
+    catch (...) {
+    }
   }
 
   bool
@@ -692,30 +705,23 @@ namespace nvhttp::stream_start {
       launch_session.env["SUNSHINE_CLIENT_DISPLAY_NAME"] = intent.device_id;
     }
 
-    // Display configuration can change the active capture target, so probe
-    // encoders only after the display stack has settled.
-    auto display_result = display_device::session_t::get().configure_display(config::video, launch_session, is_reconfigure);
-    auto outcome = classify_configure_result(display_result.result);
-    if (display_result) {
-      hdr::adopt_vdd_calibration_if_needed(launch_session);
+    // The host may select a VDD even when the client omitted useVdd. Publish
+    // that resolved intent before choosing luminance or programming the driver.
+    // 1123 no longer has adopt_vdd_calibration_if_needed; calibration is part of resolve_session_target.
+    const bool use_vdd = intent.target == display_device::display_intent_t::target_e::vdd;
+    if (launch_session.use_vdd != use_vdd) {
+      launch_session.use_vdd = use_vdd;
+      launch_session.env["SUNSHINE_CLIENT_USE_VDD"] = use_vdd ? "true" : "false";
+      hdr::resolve_session_target(launch_session);
     }
 
-#ifdef _WIN32
-    // Touch-keyboard experience: when the client (or its server profile)
-    // opts in, enable the AutoInvoke registry key group for the session.
-    // The touch digitizer itself is expected to be present already (VDD /
-    // remote-software virtual digitizer); failures degrade to a log line.
-    {
-      bool touch_effective = false;
-      if (launch_session.touch_keyboard < 0) {
-        touch_effective = config::get_client_touch_keyboard_enabled(launch_session.client_cert_uuid);
-      }
-      else {
-        touch_effective = launch_session.touch_keyboard == 1;
-      }
-      touch_kb::start_session(touch_effective);
-    }
-#endif
+    // Display configuration can change the active capture target, so probe
+    // encoders only after the display stack has settled.
+    const auto display_started = std::chrono::steady_clock::now();
+    auto display_result = display_device::session_t::get().configure_display(config::video, launch_session, is_reconfigure);
+    telemetry::stream_stage(use_vdd ? "vdd_create" : "display_prepare", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - display_started).count());
+    auto outcome = classify_configure_result(display_result.result);
+
     auto_recovery_result_t recovery_result;
     const auto probe_target = make_probe_target(intent);
     bool probe_matches_display_state = false;
@@ -731,7 +737,9 @@ namespace nvhttp::stream_start {
       outcome == configure_outcome_e::ok || outcome == configure_outcome_e::retry_later;
     if (initial_state_can_be_probed) {
       const auto configured_probe_target = make_configured_probe_target(intent, probe_target);
+      const auto probe_started = std::chrono::steady_clock::now();
       const auto probe_result = video::probe_encoders(configured_probe_target);
+      telemetry::stream_stage("encoder_init", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - probe_started).count());
       probe_matches_display_state = true;
       if (!probe_result) {
         return true;

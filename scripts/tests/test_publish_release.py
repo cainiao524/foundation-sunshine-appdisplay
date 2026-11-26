@@ -21,20 +21,12 @@ TAG_OBJECT = "b" * 40
 
 def make_artifacts(directory):
     (directory / f"Sunshine.{TAG}.WindowsInstaller.exe").write_bytes(b"MZ installer fixture")
-    with zipfile.ZipFile(directory / "Sunshine.Ds5Sidecar.x64.zip", "w") as archive:
-        archive.writestr("Sunshine.Ds5Sidecar.exe", b"MZ sidecar fixture")
-    sidecar = directory / "Sunshine.Ds5Sidecar.x64.zip"
-    manifest = {"schema": 1, "component_version": "1.4.3", "protocol": 1,
-                "target": "win-x64-self-contained", "license": "GPL-3.0-only",
-                "asset_name": sidecar.name, "sha256": release.sha256(sidecar),
-                "size": sidecar.stat().st_size,
-                "download_url": "https://github.com/AlkaidLab/foundation-sunshine/releases/download/upstream/" + sidecar.name}
-    (directory / "Sunshine.Ds5Sidecar.manifest.json").write_text(json.dumps(manifest), encoding="utf-8-sig")
+    with zipfile.ZipFile(directory / f"Sunshine.{TAG}.Symbols-x64.zip", "w") as archive:
+        archive.writestr("Sunshine.pdb", b"symbols fixture")
     with zipfile.ZipFile(directory / f"Sunshine.{TAG}.Portable-x64.zip", "w") as archive:
         for filename in ["Sunshine/sunshine.exe", "Sunshine/assets/gui/sunshine-gui.exe",
                          "Sunshine/assets/gui/alkaidlab-plugin-stylus.dll"]:
             archive.writestr(filename, b"MZ portable fixture")
-        archive.writestr("Sunshine/tools/ds5-sidecar-package.json", json.dumps(manifest))
     write_checksums(directory)
 
 
@@ -134,7 +126,7 @@ class PublisherTests(unittest.TestCase):
         self.assertFalse(result["draft"])
         self.assertEqual(self.publisher.tag_commit(), COMMIT)
         self.assertEqual(self.gh.tag["type"], "tag")
-        self.assertEqual(len(self.gh.uploads), 6)
+        self.assertEqual(len(self.gh.uploads), len(release.expected_names(TAG)))
         self.assertIn(self.publisher.marker, result["body"])
 
     def test_nested_annotated_tag_mismatch_refused_without_mutations(self):
@@ -248,25 +240,19 @@ class PublisherTests(unittest.TestCase):
         self.assertIn(unexpected, self.gh.release["assets"])
         self.assertTrue(self.gh.release["draft"])
 
-    def test_local_bad_manifest_fails_before_tag_creation(self):
-        path = self.artifacts / "Sunshine.Ds5Sidecar.manifest.json"
-        value = release.read_json(path)
-        value["sha256"] = "0" * 64
-        path.write_text(json.dumps(value), encoding="utf-8")
-        with self.assertRaisesRegex(release.ReleaseError, "DualSense manifest"):
+    def test_missing_required_portable_binary_fails_before_tag_creation(self):
+        path = self.artifacts / f"Sunshine.{TAG}.Portable-x64.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("Sunshine/sunshine.exe", b"MZ portable fixture")
+        write_checksums(self.artifacts)
+        with self.assertRaisesRegex(release.ReleaseError, "required binary"):
             self.publish()
         self.assertFalse(self.gh.mutations)
 
-    def test_embedded_pin_mismatch_is_rejected_even_with_matching_checksums(self):
-        path = self.artifacts / f"Sunshine.{TAG}.Portable-x64.zip"
-        with zipfile.ZipFile(path, "r") as archive:
-            contents = {name: archive.read(name) for name in archive.namelist()}
-        contents["Sunshine/tools/ds5-sidecar-package.json"] = b'{"schema":1}'
-        with zipfile.ZipFile(path, "w") as archive:
-            for name, content in contents.items():
-                archive.writestr(name, content)
+    def test_unexpected_extra_file_is_rejected(self):
+        (self.artifacts / "Sunshine.Ds5Sidecar.x64.zip").write_bytes(b"MZ leftover sidecar")
         write_checksums(self.artifacts)
-        with self.assertRaisesRegex(release.ReleaseError, "pin differs"):
+        with self.assertRaisesRegex(release.ReleaseError, "expected files"):
             self.publish()
         self.assertFalse(self.gh.mutations)
 
@@ -306,3 +292,14 @@ class PublisherTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TagValidationTests(unittest.TestCase):
+    def test_accepts_upstream_tag_plus_appdisplay(self):
+        tag = "v2026.1123.185102.杂鱼-appdisplay"
+        publisher = release.Publisher("owner/repo", tag, COMMIT, lambda *args, **kwargs: None)
+        self.assertEqual(publisher.tag, tag)
+
+    def test_rejects_path_like_tags(self):
+        with self.assertRaises(release.ReleaseError):
+            release.Publisher("owner/repo", "v1/../etc", COMMIT, lambda *args, **kwargs: None)

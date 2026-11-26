@@ -1,9 +1,9 @@
 name: Sync upstream stable
 
+# Automatic schedule removed: this workflow must be started by hand
+# (workflow_dispatch). GitHub only honours that change after it is on the
+# default branch.
 on:
-  schedule:
-    # 02:17, 08:17, 14:17, 20:17 Asia/Taipei (GitHub scheduling may be delayed).
-    - cron: '17 */6 * * *'
   workflow_dispatch:
     inputs:
       check-only:

@@ -5,23 +5,30 @@
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 #include "configuration.h"
+#include "src/build_info.h"
 #include "src/config.h"
+#include "src/confighttp/apps.h"
 #include "src/globals.h"
 #include "src/confighttp/auth.h"
 #include "src/confighttp/common.h"
 #include "src/display_device/session.h"
 #include "src/display_device/to_string.h"
 #include "src/display_device/vdd_settings.h"
+#include "src/doctor/doctor_os.h"
 #include "src/file_handler.h"
 #include "src/logging.h"
 #include "src/nvenc/frame_budget.h"
 #include "src/nvhttp.h"
 #include "src/network.h"
 #include "src/platform/common.h"
+#include "src/settings_reset.h"
+#include "src/sparxie/apps_file_lock.h"
+#include "src/stream.h"
+#include "src/telemetry/telemetry.h"
 #include "src/utility.h"
 #include "src/video.h"
-#include "version.h"
 #include <boost/property_tree/json_parser.hpp>
+#include <chrono>
 #include <sstream>
 
 using namespace std::literals;
@@ -44,6 +51,7 @@ namespace confighttp::configuration {
           { "address_family", config::sunshine.address_family },
           { "port", config::sunshine.port },
           { "upnp", static_cast<bool>(config::sunshine.flags[config::flag::UPNP]) },
+          { "origin_web_ui_allowed", config::nvhttp.origin_web_ui_allowed },
         } },
       };
       try {
@@ -59,6 +67,7 @@ namespace confighttp::configuration {
           { "address_family", value("address_family", "ipv4") },
           { "port", std::stoi(value("port", "47989")) },
           { "upnp", upnp == "enabled" || upnp == "true" || upnp == "1" },
+          { "origin_web_ui_allowed", value("origin_web_ui_allowed", "lan") },
         };
         for (const auto &address : net::local_addresses()) output["addresses"].push_back({ { "name", address.name }, { "address", address.address } });
       }
@@ -103,7 +112,9 @@ namespace confighttp::configuration {
       outputTree.add_child("adapters", adapters_nodes);
       outputTree.put("status", "true");
       outputTree.put("platform", SUNSHINE_PLATFORM);
-      outputTree.put("version", PROJECT_VER);
+      // The Windows build the host runs on (RtlGetVersion), for the first-run guide: the base virtual display has no HDR on Windows 10 (build 19045 at most). Left out where it is unknown.
+      if (const auto windows_build = doctor::os::windows_build()) outputTree.put("windows_build", *windows_build);
+      outputTree.put("version", build_info::version());
 
       auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
       for (auto &[name, value] : vars) {
@@ -123,6 +134,9 @@ namespace confighttp::configuration {
       outputTree.put("nvidia_vsync.version", 1);
 #endif
       outputTree.put("active_encoder", video::active_encoder_name());
+      // what the encoder probe resolved the two codec settings to (0 = not probed yet, 1 = not offered, 2 = offered, 3 = offered with 10-bit)
+      outputTree.put("active_hevc_mode", video::active_hevc_mode);
+      outputTree.put("active_av1_mode", video::active_av1_mode);
       if (auto frame_budget = nvenc::get_frame_budget_report()) {
         pt::ptree budget_node;
         budget_node.put("clamped", frame_budget->clamped);
@@ -323,10 +337,28 @@ namespace confighttp::configuration {
         }
 
         // 更新配置
-        if (!config::update_full_config(fullConfig)) {
+        std::string previous_locale;
+        // the settings that are reported when they change (an allow-list of keys, values as enums or buckets) are compared with what was saved before
+        const auto saved_before = config::get_config_snapshot();
+        if (!config::update_full_config(fullConfig, &previous_locale)) {
           outputTree.put("status", "false");
           outputTree.put("error", "failed to persist configuration");
           return;
+        }
+        // the two telemetry choices take effect at once: what the off kind had waiting is dropped
+        telemetry::consent_changed();
+        if (saved_before) telemetry::settings_changed(*saved_before, fullConfig);
+        // the language of the host changed: the built-in applications show their names in it (a name the person changed stays)
+        const auto locale_now = fullConfig.find("locale");
+        if (locale_now != fullConfig.end() && !locale_now->second.empty() && locale_now->second != previous_locale) {
+          confighttp::apps::retitle_defaults(locale_now->second);
+        }
+
+        // The bitrate ceiling takes effect now: update_full_config set it in this process, the running sessions take it before the answer goes out (so the tray, which waits for it, can say it is applied).
+        {
+          const auto changed = stream::session::apply_host_bitrate_cap();
+          outputTree.put("max_bitrate_in_force", config::host_max_bitrate_kbps());
+          outputTree.put("sessions_updated", static_cast<int>(changed.size()));
         }
       }
       catch (std::exception &e) {
@@ -339,12 +371,149 @@ namespace confighttp::configuration {
       outputTree.put("status", "true");
     }
 
+    // ---- 恢复默认设置: copy sunshine.conf, write the defaults, restart (src/settings_reset.h). Paired devices live in the state file and are not touched.
+    settings_reset::gate_t &
+    reset_gate() {
+      static settings_reset::gate_t gate;
+      return gate;
+    }
+
+    settings_reset::paths_t
+    reset_paths() {
+      return { file_handler::path_from_utf8(config::sunshine.config_file), file_handler::path_from_utf8(config::stream.file_apps), file_handler::path_from_utf8(SUNSHINE_ASSETS_DIR "/apps.json") };
+    }
+
+    settings_reset::parse_t
+    reset_parser() {
+      return [](std::string_view text) {
+        const auto parsed = config::parse_config(text);
+        return std::map<std::string, std::string> { parsed.begin(), parsed.end() };
+      };
+    }
+
+    settings_reset::now_t
+    reset_clock() {
+      return [] { return static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()); };
+    }
+
+    web::StatusCode
+    reset_status_of(settings_reset::error_e error) {
+      switch (error) {
+        case settings_reset::error_e::none:
+          return web::StatusCode::ok;
+        case settings_reset::error_e::busy:
+          return web::StatusCode::conflict;
+        case settings_reset::error_e::no_backup:
+          return web::StatusCode::not_found;
+        default:
+          return web::StatusCode::internal_server_error;
+      }
+    }
+
+    void
+    write_reset_error(resp_https_t response, settings_reset::error_e error) {
+      auto headers = json_headers();
+      response->write(reset_status_of(error), nlohmann::json { { "status", false }, { "code", std::string { settings_reset::error_code(error) } }, { "error", std::string { settings_reset::error_code(error) } } }.dump(), headers);
+    }
+
+    /// The copies that exist (newest first), for the page that offers the restore.
+    void
+    getConfigReset(resp_https_t response, req_https_t request) {
+      if (!authenticate(response, request)) return;
+      json output { { "status", true }, { "limit", settings_reset::kept_copies }, { "backups", json::array() } };
+      for (const auto &backup : settings_reset::list_backups(reset_paths())) {
+        output["backups"].push_back({ { "stamp", backup.stamp }, { "created_ms", backup.created_ms }, { "has_apps", backup.has_apps } });
+      }
+      send_response(response, output);
+    }
+
+    /// Both POST routes answer first and restart after the answer has gone out (the page waits for the host to come back).
+    void
+    answer_and_restart(resp_https_t response, const json &body) {
+      web::CaseInsensitiveMultimap headers = json_headers();
+      response->write(body.dump(), headers);
+      response->send([](const auto &error) {
+        if (error) BOOST_LOG(debug) << "Settings reset: the answer did not reach the client: "sv << error.message();
+        platf::restart("settings");
+      });
+    }
+
+    void
+    resetConfig(resp_https_t response, req_https_t request) {
+      if (!check_content_type(response, request, "application/json")) return;
+      if (!authenticate(response, request)) return;
+      print_req(request);
+
+      json body;
+      if (!read_json_body(response, request, body)) return;
+      const auto clear_apps = body.is_object() ? body.find("clear_apps") : body.end();
+      if (!body.is_object() || (clear_apps != body.end() && !clear_apps->is_boolean())) {
+        write_json(std::move(response), web::StatusCode::bad_request, { { "status", false }, { "code", "bad_request" }, { "error", "clear_apps must be true or false" } });
+        return;
+      }
+      const bool with_apps = clear_apps != body.end() && clear_apps->get<bool>();
+
+      auto &gate = reset_gate();
+      if (!gate.try_enter()) {
+        write_reset_error(std::move(response), settings_reset::error_e::busy);
+        return;
+      }
+      settings_reset::result_t result;
+      // an exception on the way (a path that cannot be converted, no memory) opens the gate again: a failed call must not keep every later one out
+      auto open_gate = util::fail_guard([&gate] { gate.leave(false); });
+      {
+        // the application list is written by other routes under its own lock: the order is that lock, then the settings file's
+        std::lock_guard apps_lock(::sparxie::apps_file_mutex);
+        config::with_config_file_locked([&] { result = settings_reset::reset_to_defaults(reset_paths(), with_apps, reset_parser(), reset_clock()); });
+      }
+      open_gate.disable();
+      gate.leave(static_cast<bool>(result));
+      if (!result) {
+        BOOST_LOG(warning) << "Settings reset failed: "sv << settings_reset::error_code(result.error);
+        write_reset_error(std::move(response), result.error);
+        return;
+      }
+      BOOST_LOG(info) << "Settings reset to the defaults (application list "sv << (result.apps_changed ? "replaced"sv : "kept"sv) << "), restarting"sv;
+      answer_and_restart(std::move(response), { { "status", true }, { "backup", result.backup }, { "apps_cleared", result.apps_changed }, { "restarting", true } });
+    }
+
+    void
+    restoreConfigReset(resp_https_t response, req_https_t request) {
+      if (!check_content_type(response, request, "application/json")) return;
+      if (!authenticate(response, request)) return;
+      print_req(request);
+
+      auto &gate = reset_gate();
+      if (!gate.try_enter()) {
+        write_reset_error(std::move(response), settings_reset::error_e::busy);
+        return;
+      }
+      settings_reset::result_t result;
+      auto open_gate = util::fail_guard([&gate] { gate.leave(false); });
+      {
+        std::lock_guard apps_lock(::sparxie::apps_file_mutex);
+        config::with_config_file_locked([&] { result = settings_reset::restore_latest(reset_paths(), reset_parser(), reset_clock()); });
+      }
+      open_gate.disable();
+      gate.leave(static_cast<bool>(result));
+      if (!result) {
+        BOOST_LOG(warning) << "Settings restore failed: "sv << settings_reset::error_code(result.error);
+        write_reset_error(std::move(response), result.error);
+        return;
+      }
+      BOOST_LOG(info) << "Settings restored from the copy of "sv << result.restored << ", restarting"sv;
+      answer_and_restart(std::move(response), { { "status", true }, { "restored", result.restored }, { "backup", result.backup }, { "apps_restored", result.apps_changed }, { "restarting", true } });
+    }
+
   }  // namespace
 
   void
   register_routes(https_server_t &server) {
     server.resource["^/api/config$"]["GET"] = getConfig;
     server.resource["^/api/config$"]["POST"] = saveConfig;
+    server.resource["^/api/config/reset$"]["GET"] = getConfigReset;
+    server.resource["^/api/config/reset$"]["POST"] = resetConfig;
+    server.resource["^/api/config/reset/restore$"]["POST"] = restoreConfigReset;
     server.resource["^/api/gamepad/config$"]["GET"] = getGamepadConfig;
     server.resource["^/api/gamepad/config$"]["POST"] = saveGamepadConfig;
     server.resource["^/api/configLocale$"]["GET"] = getLocale;

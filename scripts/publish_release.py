@@ -36,9 +36,9 @@ def run_command(args: list[str], *, payload: str | None = None, missing_ok=False
 
 
 def expected_names(tag: str) -> set[str]:
+    # 1123 ships native DualSense; the optional sidecar package is no longer published.
     return {f"Sunshine.{tag}.WindowsInstaller.exe", f"Sunshine.{tag}.Portable-x64.zip",
-            "Sunshine.Ds5Sidecar.x64.zip", "Sunshine.Ds5Sidecar.manifest.json",
-            "SHA256SUMS.txt", "checksums.json"}
+            f"Sunshine.{tag}.Symbols-x64.zip", "SHA256SUMS.txt", "checksums.json"}
 
 
 def sha256(path: Path) -> str:
@@ -56,7 +56,7 @@ def verify_files(directory: Path, tag: str) -> dict[str, tuple[int, str]]:
     entries = list(directory.iterdir())
     if {entry.name for entry in entries} != names or any(
             entry.is_symlink() or not entry.is_file() for entry in entries):
-        raise ReleaseError("Release directory must contain exactly the six expected files.")
+        raise ReleaseError("Release directory must contain exactly the expected files.")
     actual = {name: ((directory / name).stat().st_size, sha256(directory / name)) for name in names}
     if any(size <= 0 for size, _ in actual.values()):
         raise ReleaseError("Release assets must not be empty.")
@@ -83,20 +83,6 @@ def verify_files(directory: Path, tag: str) -> dict[str, tuple[int, str]]:
     wanted = {name: actual[name][1] for name in package_names}
     if json_hashes != wanted or text_hashes != wanted:
         raise ReleaseError("Package hashes do not match both checksum files.")
-    manifest = read_json(directory / "Sunshine.Ds5Sidecar.manifest.json")
-    sidecar = "Sunshine.Ds5Sidecar.x64.zip"
-    if (not isinstance(manifest, dict) or manifest.get("schema") != 1
-            or type(manifest.get("protocol")) is not int or manifest["protocol"] <= 0
-            or manifest.get("target") != "win-x64-self-contained"
-            or manifest.get("license") != "GPL-3.0-only"
-            or not isinstance(manifest.get("component_version"), str)
-            or not manifest["component_version"]
-            or manifest.get("asset_name") != sidecar
-            or not isinstance(manifest.get("download_url"), str)
-            or not re.fullmatch(r"https://github\.com/AlkaidLab/foundation-sunshine/releases/download/[^/]+/Sunshine\.Ds5Sidecar\.x64\.zip", manifest["download_url"])
-            or manifest.get("size") != actual[sidecar][0]
-            or manifest.get("sha256") != actual[sidecar][1]):
-        raise ReleaseError("DualSense manifest does not match the component package.")
     for name in package_names:
         if not name.endswith(".zip"):
             continue
@@ -109,17 +95,18 @@ def verify_files(directory: Path, tag: str) -> dict[str, tuple[int, str]]:
                             "Sunshine/assets/gui/alkaidlab-plugin-stylus.dll"]
                 if any(member not in members or members[member].file_size == 0 for member in required):
                     raise ReleaseError("Portable package lacks a required binary.")
-                embedded = json.loads(archive.read(members["Sunshine/tools/ds5-sidecar-package.json"]).decode("utf-8-sig"))
-                if embedded != manifest:
-                    raise ReleaseError("Portable package's DualSense pin differs from the release manifest.")
     return actual
+
 
 
 class Publisher:
     def __init__(self, repository: str, tag: str, commit: str, runner=run_command):
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
             raise ReleaseError("Expected repository in owner/name form.")
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", tag) or ".." in tag or tag.endswith((".", ".lock")):
+        # Allow the upstream 杂鱼 suffix plus -appdisplay, but still reject
+        # path separators, ".." and other unsafe ref forms.
+        if (not re.fullmatch(r"[A-Za-z0-9][\w._+-]{0,127}", tag, re.UNICODE)
+                or ".." in tag or "/" in tag or tag.endswith((".", ".lock"))):
             raise ReleaseError("Expected a safe downstream version tag.")
         if not re.fullmatch(r"[0-9a-f]{40}", commit):
             raise ReleaseError("Expected a full lowercase commit SHA.")
@@ -198,7 +185,7 @@ class Publisher:
     def verify_metadata(self, release, actual):
         assets = release["assets"]
         if len(assets) != len(actual) or {asset["name"] for asset in assets} != set(actual):
-            raise ReleaseError("Remote release must contain exactly the six expected assets.")
+            raise ReleaseError("Remote release must contain exactly the expected assets.")
         for asset in assets:
             size, digest = actual[asset["name"]]
             if (asset.get("state") != "uploaded" or asset.get("size") != size
@@ -211,7 +198,7 @@ class Publisher:
             raise ReleaseError("Expected a published release.")
         if release["prerelease"] != expected_prerelease:
             raise ReleaseError("Published release has the wrong prerelease status.")
-        if len(release["assets"]) != 6 or {a["name"] for a in release["assets"]} != expected_names(self.tag):
+        if len(release["assets"]) != len(expected_names(self.tag)) or {a["name"] for a in release["assets"]} != expected_names(self.tag):
             raise ReleaseError("Published release is incomplete; it will not be modified automatically.")
         with tempfile.TemporaryDirectory(prefix="sunshine-release-verify-") as temporary:
             self.run(["gh", "release", "download", self.tag, "--repo", self.repository, "--dir", temporary])

@@ -33,14 +33,14 @@
 
 - Windows 原生测试、网页测试、控制面板测试、MAT 回归和虚拟显示器辅助测试均为发布前置条件。
 - 构建、测试、发布锁定同一提交；PowerShell 原生命令失败会中止步骤。
-- 控制面板固定为仓库子模块版本，DualSense 可选组件沿用锁定上游正式版的校验清单。
+- 控制面板固定为仓库子模块版本；1123 起使用上游内置原生 DualSense，不再附带 sidecar 组件。
 - 安装包构建工具使用仓库锁定版本，并验证下载文件的 SHA256。
 
 ## 下载
 
 - 安装版：`{{INSTALLER_FILE}}`
 - 便携版：`{{PORTABLE_FILE}}`
-- DualSense 可选组件：`Sunshine.Ds5Sidecar.x64.zip` 与对应清单。
+- 符号包：与安装版、便携版一同发布的 `Sunshine.<tag>.Symbols-x64.zip`。
 - 完整校验信息：`SHA256SUMS.txt`、`checksums.json`。
 
 ```text

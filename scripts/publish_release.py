@@ -158,22 +158,47 @@ class Publisher:
             raise ReleaseError("Release tag must refer to a commit.")
         return obj["sha"]
 
+    def owned_draft(self, release) -> bool:
+        return bool(release.get("draft")) and self.marker in (release.get("body") or "").splitlines()
+
+    def detached_draft(self, release) -> bool:
+        """An owned draft whose tag_name GitHub replaced with an untagged-<hash> placeholder.
+
+        GitHub can report a draft's tag_name as untagged-<hash> right after creation or
+        after an asset upload (run 45823921836). Such a draft is ours only when it still
+        carries this publication's exact marker (tag and commit).
+        """
+        return (str(release.get("tag_name", "")).startswith("untagged-")
+                and self.owned_draft(release))
+
     def get_release(self):
         release = self.api(f"{self.base}/releases/tags/{quote(self.tag, safe='')}", missing_ok=True)
         if release is not None:
             return release
         # GitHub's by-tag endpoint can omit unpublished drafts; list authenticated releases.
         page = 1
+        matches = []
         while True:
             releases = self.api(f"{self.base}/releases?per_page=100&page={page}")
-            matches = [item for item in releases if item["tag_name"] == self.tag]
-            if len(matches) > 1:
-                raise ReleaseError("Multiple releases use this tag.")
-            if matches:
-                return matches[0]
+            matches += [item for item in releases
+                        if item["tag_name"] == self.tag or self.detached_draft(item)]
             if len(releases) < 100:
-                return None
+                break
             page += 1
+        if len(matches) > 1:
+            raise ReleaseError("Multiple releases use this tag.")
+        return matches[0] if matches else None
+
+    def get_release_by_id(self, release_id: int):
+        """The release we created or adopted, tracked by id so a tag_name change cannot lose it."""
+        release = self.api(f"{self.base}/releases/{int(release_id)}", missing_ok=True)
+        if release is None:
+            return None
+        if release["tag_name"] != self.tag and not self.detached_draft(release):
+            raise ReleaseError("Tracked release is no longer bound to the expected tag.")
+        if release["draft"] and not self.owned_draft(release):
+            raise ReleaseError("Tracked draft is no longer owned by this publication.")
+        return release
 
     def inspect(self):
         tagged_commit = self.tag_commit()
@@ -181,11 +206,19 @@ class Publisher:
             raise ReleaseError("Existing release tag points to a different commit; refusing to move it.")
         release = self.get_release()
         if release is not None:
-            if tagged_commit is None or release["tag_name"] != self.tag:
-                raise ReleaseError("Existing release is not bound to the expected tag.")
-            if release["draft"] and self.marker not in (release.get("body") or "").splitlines():
+            if release["draft"] and not self.owned_draft(release):
                 raise ReleaseError("Existing draft is not owned by this publication.")
+            if release["tag_name"] != self.tag and not self.detached_draft(release):
+                raise ReleaseError("Existing release is not bound to the expected tag.")
+            if tagged_commit is None:
+                raise ReleaseError("Existing release is not bound to the expected tag.")
         return tagged_commit, release
+
+    def track(self, release_id: int):
+        """Re-read the tracked draft and the tag; the tag must still point at our commit."""
+        if self.tag_commit() != self.commit:
+            raise ReleaseError("Release tag changed to another commit.")
+        return self.get_release_by_id(release_id)
 
     def ensure_tag(self):
         existing = self.tag_commit()
@@ -247,11 +280,12 @@ class Publisher:
             release = self.api(f"{self.base}/releases", "POST", {
                 **metadata, "tag_name": self.tag, "target_commitish": self.commit, "draft": True})
         else:
-            release = self.api(f"{self.base}/releases/{release['id']}", "PATCH", metadata)
+            release = self.api(f"{self.base}/releases/{release['id']}", "PATCH",
+                               {**metadata, "tag_name": self.tag})
         release_id = release["id"]
         for filename in sorted(actual):
-            _, current = self.inspect()
-            if current is None or current["id"] != release_id:
+            current = self.track(release_id)
+            if current is None:
                 raise ReleaseError("Draft changed during upload.")
             if not current["draft"]:
                 return self.verify_published(prerelease)
@@ -264,16 +298,32 @@ class Publisher:
                     and matching[0].get("size") == actual[filename][0]
                     and matching[0].get("state") == "uploaded"):
                 continue
-            self.run(["gh", "release", "upload", self.tag, str(artifacts / filename),
-                      "--repo", self.repository, "--clobber"])
-        _, release = self.inspect()
-        if release is None or release["id"] != release_id:
+            if matching:
+                # Only an incomplete or stale copy in our own draft is replaced.
+                self.api(f"{self.base}/releases/assets/{int(matching[0]['id'])}", "DELETE")
+            # Upload by release id: gh release upload looks the draft up by tag_name,
+            # which GitHub may have replaced with untagged-<hash>.
+            self.run(["gh", "api", "--method", "POST",
+                      "-H", "Content-Type: application/octet-stream",
+                      f"https://uploads.github.com/{self.base}/releases/{int(release_id)}/assets"
+                      f"?name={quote(filename, safe='')}",
+                      "--input", str(artifacts / filename)])
+        release = self.track(release_id)
+        if release is None:
             raise ReleaseError("Draft changed before publication.")
         if not release["draft"]:
             return self.verify_published(prerelease)
         self.verify_metadata(release, actual)
+        if release["tag_name"] != self.tag:
+            # Rebind the detached draft to the verified tag before it is published.
+            self.api(f"{self.base}/releases/{release_id}", "PATCH", {"tag_name": self.tag})
+            release = self.track(release_id)
+            if release is None or not release["draft"]:
+                raise ReleaseError("Draft changed before publication.")
+            self.verify_metadata(release, actual)
         self.api(f"{self.base}/releases/{release_id}", "PATCH", {
-            "draft": False, "make_latest": "false" if prerelease else "true"})
+            "tag_name": self.tag, "draft": False,
+            "make_latest": "false" if prerelease else "true"})
         return self.verify_published(prerelease)
 
 

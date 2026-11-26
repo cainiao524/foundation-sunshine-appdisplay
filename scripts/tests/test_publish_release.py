@@ -51,10 +51,39 @@ class FakeGitHub:
         self.fail_upload = None
         self.wrong_digest = None
         self.draft_by_tag_hidden = False
+        # GitHub can report a draft's tag_name as untagged-<hash> (run 45823921836):
+        # "create" detaches it right after creation, "upload" after the first asset upload.
+        self.detach_draft = None
+        self.next_asset_id = 100
+
+    def detach(self):
+        if self.release is not None and self.release["draft"]:
+            self.release["tag_name"] = "untagged-0123456789abcdef0123"
+
+    def store_asset(self, path):
+        assert self.release["draft"], "published assets must never be changed"
+        self.uploads.append(path.name)
+        if path.name == self.fail_upload:
+            self.fail_upload = None
+            raise release.ReleaseError("simulated interrupted upload")
+        content = path.read_bytes()
+        self.files[path.name] = content
+        assert all(asset["name"] != path.name for asset in self.release["assets"]), "delete before re-upload"
+        self.next_asset_id += 1
+        self.release["assets"].append({"id": self.next_asset_id, "name": path.name, "size": len(content), "state": "uploaded",
+                                       "digest": "sha256:" + ("0" * 64 if path.name == self.wrong_digest else release.sha256(path))})
+        if self.detach_draft == "upload":
+            self.detach()
 
     def __call__(self, args, *, payload=None, missing_ok=False):
         assert isinstance(args, list)
         self.calls.append(args)
+        if args[:2] == ["gh", "api"] and args[4].startswith("-H"):
+            assert args[3] == "POST" and args[5] == "Content-Type: application/octet-stream"
+            assert args[6].startswith("https://uploads.github.com/repos/owner/repo/releases/1/assets?name="), args
+            self.mutations.append(("POST", "upload"))
+            self.store_asset(Path(args[args.index("--input") + 1]))
+            return "{}"
         if args[:2] == ["gh", "api"]:
             method, endpoint = args[3], args[4].removeprefix("repos/owner/repo")
             data = json.loads(payload) if payload is not None else None
@@ -72,31 +101,29 @@ class FakeGitHub:
                 self.tag = {"type": "tag", "sha": data["sha"]}
                 return "{}"
             if endpoint.startswith("/releases/tags/"):
-                return None if self.release is None or (self.release["draft"] and self.draft_by_tag_hidden) else json.dumps(self.release)
+                return None if (self.release is None or self.release["tag_name"] != TAG
+                                or (self.release["draft"] and self.draft_by_tag_hidden)) else json.dumps(self.release)
+            if endpoint == "/releases/1" and method == "GET":
+                return None if self.release is None else json.dumps(self.release)
+            if endpoint.startswith("/releases/assets/") and method == "DELETE":
+                assert self.release["draft"], "published assets must never be changed"
+                asset_id = int(endpoint.rsplit("/", 1)[1])
+                self.release["assets"] = [asset for asset in self.release["assets"] if asset["id"] != asset_id]
+                return ""
             if endpoint.startswith("/releases?"):
                 return json.dumps([] if self.release is None else [self.release])
             if endpoint == "/releases" and method == "POST":
                 assert self.release is None
                 self.release = {**data, "id": 1, "assets": [], "html_url": "https://github.com/owner/repo/releases/tag/" + TAG}
+                if self.detach_draft == "create":
+                    self.detach()
+                    return json.dumps(self.release)
                 return json.dumps(self.release)
             if endpoint == "/releases/1" and method == "PATCH":
                 assert self.release["draft"], "published releases must never be changed"
                 self.release.update(data)
                 return json.dumps(self.release)
             raise AssertionError(args)
-        if args[:3] == ["gh", "release", "upload"]:
-            assert self.release["draft"], "published assets must never be changed"
-            path = Path(args[4])
-            self.uploads.append(path.name)
-            if path.name == self.fail_upload:
-                self.fail_upload = None
-                raise release.ReleaseError("simulated interrupted upload")
-            content = path.read_bytes()
-            self.files[path.name] = content
-            self.release["assets"] = [asset for asset in self.release["assets"] if asset["name"] != path.name]
-            self.release["assets"].append({"name": path.name, "size": len(content), "state": "uploaded",
-                                           "digest": "sha256:" + ("0" * 64 if path.name == self.wrong_digest else release.sha256(path))})
-            return ""
         if args[:3] == ["gh", "release", "download"]:
             directory = Path(args[args.index("--dir") + 1])
             for name, content in self.files.items():
@@ -156,6 +183,80 @@ class PublisherTests(unittest.TestCase):
         self.assertFalse(self.gh.release["draft"])
         for filename in uploaded_before:
             self.assertEqual(self.gh.uploads.count(filename), 1)
+
+    def assert_rebound_then_published(self):
+        self.assertFalse(self.gh.release["draft"])
+        self.assertEqual(self.gh.release["tag_name"], TAG)
+        self.assertEqual({asset["name"] for asset in self.gh.release["assets"]}, release.expected_names(TAG))
+
+    def test_draft_detached_right_after_creation_is_tracked_by_id(self):
+        # Run 45823921836 failed with "Draft changed during upload." once tag_name became untagged-*.
+        self.gh.detach_draft = "create"
+        self.publish()
+        self.assert_rebound_then_published()
+        self.assertEqual(len(self.gh.uploads), len(release.expected_names(TAG)))
+
+    def test_draft_detached_after_first_upload_is_rebound_before_publication(self):
+        self.gh.detach_draft = "upload"
+        self.gh.draft_by_tag_hidden = True
+        self.publish()
+        self.assert_rebound_then_published()
+        patches = [call for call in self.gh.calls if call[:5] == ["gh", "api", "--method", "PATCH", "repos/owner/repo/releases/1"]]
+        self.assertGreaterEqual(len(patches), 2)
+
+    def test_interrupted_detached_owned_draft_is_adopted_by_marker(self):
+        self.gh.detach_draft = "upload"
+        self.gh.fail_upload = sorted(release.expected_names(TAG))[2]
+        with self.assertRaisesRegex(release.ReleaseError, "interrupted"):
+            self.publish()
+        self.assertTrue(self.gh.release["tag_name"].startswith("untagged-"))
+        uploaded_before = set(self.gh.files)
+        self.publish()
+        self.assert_rebound_then_published()
+        for filename in uploaded_before:
+            self.assertEqual(self.gh.uploads.count(filename), 1)
+
+    def test_detached_draft_without_our_marker_is_not_adopted(self):
+        self.gh.tag = {"type": "commit", "sha": COMMIT}
+        self.gh.release = {"id": 1, "tag_name": "untagged-feedface", "draft": True,
+                           "body": "Human draft", "assets": []}
+        # Not ours, so it is invisible to this publication, and creating a second release is refused by the fake.
+        self.assertEqual(self.publisher.inspect(), (COMMIT, None))
+        with self.assertRaises(AssertionError):
+            self.publish()
+        self.assertEqual(self.gh.release["tag_name"], "untagged-feedface")
+        self.assertFalse([m for m in self.gh.mutations if m[1].startswith("/releases/1") or m[1] == "upload"])
+
+    def test_detached_draft_of_another_commit_is_not_adopted(self):
+        other = release.Publisher("owner/repo", TAG, "c" * 40, self.gh)
+        self.gh.tag = {"type": "commit", "sha": COMMIT}
+        self.gh.release = {"id": 1, "tag_name": "untagged-feedface", "draft": True,
+                           "body": other.marker + "\n\nnotes", "assets": []}
+        self.assertEqual(self.publisher.inspect(), (COMMIT, None))
+
+    def test_tracked_draft_that_loses_its_marker_stops_the_upload(self):
+        self.gh.detach_draft = "upload"
+        original = self.gh.store_asset
+
+        def tamper(path):
+            original(path)
+            self.gh.release["body"] = "edited by a human"
+        self.gh.store_asset = tamper
+        with self.assertRaisesRegex(release.ReleaseError, "no longer"):
+            self.publish()
+        self.assertTrue(self.gh.release["draft"])
+        self.assertEqual(len(self.gh.uploads), 1)
+
+    def test_tag_moved_during_upload_stops_before_publication(self):
+        original = self.gh.store_asset
+
+        def move(path):
+            original(path)
+            self.gh.tag = {"type": "commit", "sha": "d" * 40}
+        self.gh.store_asset = move
+        with self.assertRaisesRegex(release.ReleaseError, "another commit"):
+            self.publish()
+        self.assertTrue(self.gh.release["draft"])
 
     def test_unrelated_draft_is_not_touched(self):
         self.gh.tag = {"type": "commit", "sha": COMMIT}

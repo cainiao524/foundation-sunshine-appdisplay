@@ -30,7 +30,7 @@ class PublishTest(unittest.TestCase):
 
     def test_a_manual_publish_has_its_own_job_that_alone_can_write(self):
         publish = self.workflow["jobs"]["publish"]
-        self.assertIn("workflow_dispatch", publish["if"])
+        self.assertEqual(publish["if"].strip(), "needs.setup_release.outputs.publish_release == 'true'")
         self.assertIn("publish_release == 'true'", publish["if"])
         self.assertEqual(publish["permissions"], {"contents": "write"})
         self.assertIn("build_win", publish["needs"])
@@ -48,7 +48,7 @@ class PublishTest(unittest.TestCase):
         manual = step(self.setup, "Setup Release (Manual)")
         self.assertIn("inputs.release-tag == ''", manual["if"])
         publish = self.workflow["jobs"]["publish"]
-        self.assertIn("inputs.release-tag != ''", publish["if"])
+        self.assertEqual(publish["if"].strip(), "needs.setup_release.outputs.publish_release == 'true'")
         formal = step(publish, "Publish app-display release")
         self.assertEqual(formal["if"], "inputs.release-tag != ''")
         prerelease = step(publish, "Create the pre-release")

@@ -1931,7 +1931,13 @@ jobs:
   publish:
     name: Publish pre-release
     needs: [setup_release, build_win]
-    if: needs.setup_release.outputs.publish_release == 'true' && (inputs.release-tag != '' || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call')
+    # Key this job off setup_release outputs only. Combining inputs.release-tag
+    # with github.event_name in the job-level if skipped this job after a
+    # successful official build (run 45811530612): the needed outputs were
+    # set, but the extra clause evaluated false. Push/PR publication stays
+    # on the Windows Create/Update step (AUTO_PRERELEASE), which is skipped
+    # on this formal path. Step-level ifs still choose official vs prerelease.
+    if: needs.setup_release.outputs.publish_release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

@@ -30,7 +30,7 @@ class PublishTest(unittest.TestCase):
 
     def test_a_manual_publish_has_its_own_job_that_alone_can_write(self):
         publish = self.workflow["jobs"]["publish"]
-        self.assertEqual(publish["if"].strip(), "needs.setup_release.outputs.publish_release == 'true'")
+        self.assertEqual(publish["if"].strip(), "${{ !cancelled() && needs.setup_release.result == 'success' && needs.build_win.result == 'success' && needs.setup_release.outputs.publish_release == 'true' }}")
         self.assertIn("publish_release == 'true'", publish["if"])
         self.assertEqual(publish["permissions"], {"contents": "write"})
         self.assertIn("build_win", publish["needs"])
@@ -48,11 +48,19 @@ class PublishTest(unittest.TestCase):
         manual = step(self.setup, "Setup Release (Manual)")
         self.assertIn("inputs.release-tag == ''", manual["if"])
         publish = self.workflow["jobs"]["publish"]
-        self.assertEqual(publish["if"].strip(), "needs.setup_release.outputs.publish_release == 'true'")
+        self.assertEqual(publish["if"].strip(), "${{ !cancelled() && needs.setup_release.result == 'success' && needs.build_win.result == 'success' && needs.setup_release.outputs.publish_release == 'true' }}")
         formal = step(publish, "Publish app-display release")
         self.assertEqual(formal["if"], "inputs.release-tag != ''")
         prerelease = step(publish, "Create the pre-release")
         self.assertEqual(prerelease["if"], "inputs.release-tag == ''")
+
+    def test_publish_survives_a_skipped_shard(self):
+        # Implicit success() also checks transitive needs; build_win needs the shard job, which the warm path skips.
+        publish = self.workflow["jobs"]["publish"]
+        self.assertIn("!cancelled()", publish["if"])
+        self.assertIn("needs.build_win.result == 'success'", publish["if"])
+        self.assertIn("needs.setup_release.result == 'success'", publish["if"])
+        self.assertIn("shard", self.workflow["jobs"]["build_win"]["needs"])
 
     def test_permissions_are_read_only_unless_a_job_asks_for_more(self):
         self.assertEqual(self.workflow["permissions"], {"contents": "read"})

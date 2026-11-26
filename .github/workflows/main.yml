@@ -1931,13 +1931,11 @@ jobs:
   publish:
     name: Publish pre-release
     needs: [setup_release, build_win]
-    # Key this job off setup_release outputs only. Combining inputs.release-tag
-    # with github.event_name in the job-level if skipped this job after a
-    # successful official build (run 45811530612): the needed outputs were
-    # set, but the extra clause evaluated false. Push/PR publication stays
-    # on the Windows Create/Update step (AUTO_PRERELEASE), which is skipped
-    # on this formal path. Step-level ifs still choose official vs prerelease.
-    if: needs.setup_release.outputs.publish_release == 'true'
+    # A job-level `if` without a status function gets an implicit success(), which also looks at transitive needs:
+    # build_win needs `shard`, and `shard` is skipped on the warm path, so the implicit check skipped this job after a
+    # green official build (runs 45811530612 and 45815510399, where publish_release was 'true'). Check the results
+    # explicitly instead, like build_win does. Step-level ifs still choose official vs prerelease.
+    if: ${{ !cancelled() && needs.setup_release.result == 'success' && needs.build_win.result == 'success' && needs.setup_release.outputs.publish_release == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -1985,7 +1983,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          command -v pwsh >/dev/null || sudo apt-get update && sudo apt-get install -y powershell
+          if ! command -v pwsh >/dev/null; then sudo apt-get update && sudo apt-get install -y powershell; fi
           pwsh -File scripts/generate-app-display-release-notes.ps1 \
             -ReleaseTag "$TAG" \
             -ReleaseCommit "$COMMIT" \

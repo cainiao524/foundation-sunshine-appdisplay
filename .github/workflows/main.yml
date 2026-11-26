@@ -356,7 +356,9 @@ jobs:
     if: needs.changes.outputs.build == 'true'
     outputs:
       # Whether this run publishes a pre-release: see "Automatic pre-releases" and the manual step below.
-      # workflow_call (fork sync-upstream) uses setup_release_reusable.
+      # Formal app-display releases (sync-upstream or publish-appdisplay-release) pass release-tag
+      # and use setup_release_reusable. Do not key that path off github.event_name: a
+      # workflow_dispatch wrapper can leak event_name=workflow_dispatch into the callee.
       publish_release: ${{ steps.setup_release_reusable.outputs.publish_release || steps.auto_gate.outputs.publish || steps.setup_release_manual.outputs.publish_release }}
       release_body: ${{ steps.filter_release_contributors.outputs.release_body || steps.setup_release_auto.outputs.release_body || steps.setup_release_manual.outputs.release_body || steps.setup_release_reusable.outputs.release_body }}
       release_commit: ${{ steps.setup_release_reusable.outputs.release_commit || steps.setup_release_auto.outputs.release_commit || steps.setup_release_manual.outputs.release_commit }}
@@ -378,11 +380,11 @@ jobs:
         with:
           ref: ${{ inputs.source-ref || github.sha }}
 
-      # Fork reusable path: sync-upstream.yml calls this workflow with an explicit
-      # tag and commit. publish_release.py only checks publication guards here.
+      # Formal app-display path: the caller passes an explicit release-tag (and commit).
+      # publish_release.py only checks publication guards here.
       - name: Setup Release (Reusable / app-display)
         id: setup_release_reusable
-        if: github.event_name == 'workflow_call'
+        if: inputs.release-tag != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PUBLISH_RELEASE: ${{ inputs.publish-release }}
@@ -426,7 +428,7 @@ jobs:
 
       - name: Setup Release (Auto)
         id: setup_release_auto
-        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        if: (github.event_name == 'push' || github.event_name == 'pull_request') && inputs.release-tag == ''
         uses: LizardByte/setup-release-action@v2025.426.225
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -436,7 +438,7 @@ jobs:
       # carries them.
       - name: Automatic pre-releases
         id: auto_gate
-        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        if: (github.event_name == 'push' || github.event_name == 'pull_request') && inputs.release-tag == ''
         env:
           AUTO: ${{ steps.setup_release_auto.outputs.publish_release }}
           ENABLED: ${{ vars.AUTO_PRERELEASE }}
@@ -454,7 +456,7 @@ jobs:
       # committer date (scripts/ci/release-info.py); otherwise the run is a dev build with a manual-<date> tag.
       - name: Setup Release (Manual)
         id: setup_release_manual
-        if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+        if: (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && inputs.release-tag == ''
         env:
           PUBLISH: ${{ inputs.publish }}
           REF_NAME: ${{ github.ref_name }}
@@ -1926,7 +1928,7 @@ jobs:
   publish:
     name: Publish pre-release
     needs: [setup_release, build_win]
-    if: needs.setup_release.outputs.publish_release == 'true' && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call')
+    if: needs.setup_release.outputs.publish_release == 'true' && (inputs.release-tag != '' || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -1935,7 +1937,13 @@ jobs:
       - name: Checkout the CI scripts
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          sparse-checkout: scripts/ci
+          sparse-checkout: |
+            scripts/ci
+            scripts/publish_release.py
+            scripts/generate-app-display-release-notes.ps1
+            scripts/app-display-release-notes-template.md
+            .github/upstream-stable-release
+            .github/upstream-stable-commit
           persist-credentials: false
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -1946,7 +1954,7 @@ jobs:
       # Creates the pre-release, or replaces the assets of a pre-release that is already there; a tag that belongs to a
       # published release is an error (scripts/ci/publish-prerelease.sh).
       - name: Create the pre-release
-        if: github.event_name != 'workflow_call'
+        if: inputs.release-tag == ''
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.setup_release.outputs.release_tag }}.杂鱼
@@ -1955,10 +1963,10 @@ jobs:
         shell: bash
         run: bash scripts/ci/publish-prerelease.sh dist | tee -a "$GITHUB_STEP_SUMMARY"
 
-      # Fork: formal app-display release via sync-upstream.yml. Notes are generated
-      # here; DualSense sidecar assets are not attached (native DualSense in 1123).
+      # Formal app-display release (publish-appdisplay-release.yml or sync-upstream.yml).
+      # Notes are generated here; DualSense sidecar assets are not attached (native DualSense in 1123).
       - name: Publish app-display release
-        if: github.event_name == 'workflow_call'
+        if: inputs.release-tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.setup_release.outputs.release_tag }}

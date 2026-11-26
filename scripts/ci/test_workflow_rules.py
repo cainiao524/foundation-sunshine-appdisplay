@@ -40,6 +40,20 @@ class PublishTest(unittest.TestCase):
         for needle in ("gh release create", "--prerelease", "--target", "isPrerelease"):
             self.assertIn(needle, script)
 
+    def test_formal_appdisplay_release_is_gated_on_release_tag(self):
+        reusable = step(self.setup, "Setup Release (Reusable / app-display)")
+        self.assertEqual(reusable["if"], "inputs.release-tag != ''")
+        auto = step(self.setup, "Setup Release (Auto)")
+        self.assertIn("inputs.release-tag == ''", auto["if"])
+        manual = step(self.setup, "Setup Release (Manual)")
+        self.assertIn("inputs.release-tag == ''", manual["if"])
+        publish = self.workflow["jobs"]["publish"]
+        self.assertIn("inputs.release-tag != ''", publish["if"])
+        formal = step(publish, "Publish app-display release")
+        self.assertEqual(formal["if"], "inputs.release-tag != ''")
+        prerelease = step(publish, "Create the pre-release")
+        self.assertEqual(prerelease["if"], "inputs.release-tag == ''")
+
     def test_permissions_are_read_only_unless_a_job_asks_for_more(self):
         self.assertEqual(self.workflow["permissions"], {"contents": "read"})
         writers = sorted(name for name, job in self.workflow["jobs"].items()
@@ -57,7 +71,7 @@ class PublishTest(unittest.TestCase):
         gate = step(self.setup, "Automatic pre-releases")
         self.assertEqual(gate["env"]["ENABLED"], "${{ vars.AUTO_PRERELEASE }}")
         self.assertIn('[ "$AUTO" = true ] && [ "$ENABLED" = true ]', gate["run"])
-        self.assertEqual(gate["if"], "github.event_name == 'push' || github.event_name == 'pull_request'")
+        self.assertEqual(gate["if"], "(github.event_name == 'push' || github.event_name == 'pull_request') && inputs.release-tag == ''")
 
     def test_manual_publish_is_an_input_that_defaults_to_off_and_is_wired_through(self):
         # PyYAML reads the key `on` as the boolean True

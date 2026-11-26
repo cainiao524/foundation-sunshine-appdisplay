@@ -79,25 +79,55 @@
 
       <!-- per-app display scheme: server-side profile, same fields as the C++ parser -->
       <MSection v-if="isWindows" :title="t('apps.display_profile_title')" :text="t('apps.display_profile_policy_desc')">
-        <MChoiceItem v-model="appDisplayOutput" :title="t('config.output_name_windows')" :options="displayOutputOptions" :cancel-label="t('_common.cancel')" />
+        <template #action>
+          <MInfo :text="displayOptionsNote" />
+        </template>
+        <MDisplayCards v-model="appDisplayOutput" :label="t('config.output_name_windows')" :items="displayOutputCards" :primary-label="displayCopy.display.primary" />
+        <MFooter v-if="!displayDevices.length">{{ displayCopy.display.noneFound }}</MFooter>
         <template v-if="hasForcedDisplayProfile">
           <MBanner v-if="formData['display-target'] === 'virtual' && formData['display-device-prep'] === 'ensure_only_display'" tone="warning" icon="warning">
             {{ t('apps.display_profile_exclusive_warning') }}
           </MBanner>
-          <MChoiceItem v-model="formData['display-device-prep']" :title="t('config.display_device_prep_windows')" :options="topologyOptions" :cancel-label="t('_common.cancel')" />
-          <MChoiceItem v-model="appResolutionRule" :title="t('apps.display_profile_resolution')" :options="resolutionRuleOptions" :cancel-label="t('_common.cancel')" />
-          <p v-if="resHintText" class="apps-hint">{{ resHintText }}</p>
-          <MChoiceItem v-model="appRefreshRateRule" :title="t('apps.display_profile_refresh_rate')" :options="refreshRuleOptions" :cancel-label="t('_common.cancel')" />
-          <p v-if="rrHintText" class="apps-hint">{{ rrHintText }}</p>
-          <MSwitchItem v-model="fixedValuesEnabled" :title="t('apps.display_profile_advanced_title')" :supporting="t('apps.display_profile_advanced_sub')" />
-          <MGroup v-if="fixedValuesEnabled">
-            <MFieldItem v-model.trim="formData['display-resolution']" :label="t('apps.display_profile_fixed_resolution')" :supporting="t('apps.display_profile_advanced_res_note')" :error="resolutionFieldError" placeholder="1920x1080" />
-            <MFieldItem v-model.trim="formData['display-refresh-rate']" :label="t('apps.display_profile_fixed_refresh_rate')" :error="refreshFieldError" placeholder="59.94" />
+          <MPrepSeg v-model="formData['display-device-prep']" :label="t('config.display_device_prep_windows')" :options="topologyOptions" />
+          <MFooter>{{ topologyEffect }}</MFooter>
+          <MExpander :title="t('config.display_device_options_note_windows')">
+            <MFooter>{{ t('config.display_device_options_note_desc_windows') }}</MFooter>
+          </MExpander>
+          <MGroup>
+            <MItem :title="t('apps.display_profile_resolution')" icon="aspect_ratio" stack>
+              <template #control>
+                <MSeg v-model="appResolutionRule" block :label="t('apps.display_profile_resolution')" :options="resolutionRuleOptions" :disabled="hasFixedResolution" />
+              </template>
+            </MItem>
+            <MFooter v-if="resHintText">{{ resHintText }}</MFooter>
+            <MItem :title="t('apps.display_profile_refresh_rate')" icon="speed" stack>
+              <template #control>
+                <MSeg v-model="appRefreshRateRule" block :label="t('apps.display_profile_refresh_rate')" :options="refreshRuleOptions" :disabled="hasFixedRefreshRate" />
+              </template>
+            </MItem>
+            <MFooter v-if="rrHintText">{{ rrHintText }}</MFooter>
+            <MItem :title="t('apps.display_profile_disconnect')" icon="link_off" stack>
+              <template #control>
+                <MSeg v-model="formData['display-disconnect-action']" block :label="t('apps.display_profile_disconnect')" :options="disconnectOptions" />
+              </template>
+            </MItem>
+            <MItem :title="t('apps.display_profile_dynamic_follow')" icon="sync" stack>
+              <template #control>
+                <MSeg v-model="formData['display-dynamic-resolution-follow-display']" block :label="t('apps.display_profile_dynamic_follow')" :options="dynamicFollowOptions" />
+              </template>
+            </MItem>
           </MGroup>
-          <MChoiceItem v-model="formData['display-hdr']" :title="t('apps.display_profile_fixed_hdr')" :options="hdrOptions" :cancel-label="t('_common.cancel')" />
-          <MFooter>{{ t('apps.display_profile_advanced_hdr_note') }}</MFooter>
-          <MChoiceItem v-model="formData['display-disconnect-action']" :title="t('apps.display_profile_disconnect')" :options="disconnectOptions" :cancel-label="t('_common.cancel')" />
-          <MChoiceItem v-model="formData['display-dynamic-resolution-follow-display']" :title="t('apps.display_profile_dynamic_follow')" :options="dynamicFollowOptions" :cancel-label="t('_common.cancel')" />
+          <MExpander v-model:open="advancedOpen" :title="t('apps.display_profile_advanced_title')" :text="t('apps.display_profile_advanced_sub')">
+            <MGroup>
+              <MSwitchItem v-model="fixedValuesEnabled" :title="t('apps.display_profile_fixed_resolution')" :supporting="t('apps.display_profile_fixed_refresh_rate')" />
+              <template v-if="fixedValuesEnabled">
+                <MFieldItem v-model.trim="formData['display-resolution']" :label="t('apps.display_profile_fixed_resolution')" :supporting="t('apps.display_profile_advanced_res_note')" :error="resolutionFieldError" placeholder="2560x1440" />
+                <MFieldItem v-model.trim="formData['display-refresh-rate']" :label="t('apps.display_profile_fixed_refresh_rate')" :error="refreshFieldError" placeholder="60" />
+              </template>
+              <MChoiceItem v-model="formData['display-hdr']" :title="t('apps.display_profile_fixed_hdr')" :options="hdrOptions" :cancel-label="t('_common.cancel')" />
+            </MGroup>
+            <MFooter>{{ t('apps.display_profile_advanced_hdr_note') }}</MFooter>
+          </MExpander>
         </template>
       </MSection>
 
@@ -185,7 +215,9 @@ import { validateField as validateFieldHelper, validateAppForm } from '../utils/
 import { nanoid } from 'nanoid'
 import CommandTable from './CommandTable.vue'
 import ImageSelector from './ImageSelector.vue'
-import { MBanner, MButton, MChip, MChoiceItem, MDialog, MField, MFieldItem, MFooter, MGroup, MIcon, MIconButton, MInfo, MPage, MSection, MSwitchItem } from 'foundation-ui/vue'
+import { MBanner, MButton, MChip, MChoiceItem, MDialog, MDisplayCards, MExpander, MField, MFieldItem, MFooter, MGroup, MIcon, MIconButton, MInfo, MItem, MPage, MPrepSeg, MSection, MSeg, MSwitchItem, displayTreeTexts } from 'foundation-ui/vue'
+import { $tp } from '../platform-i18n'
+import { prepChoices } from '../composables/displayPrep.js'
 import { createFileSelector } from '../utils/fileSelection.js'
 import { apiPostJson } from '../utils/apiFetch.js'
 import { deepClone } from '../utils/helpers.js'
@@ -376,31 +408,49 @@ const appDisplayOutput = computed({
     }
   },
 })
-const displayOutputOptions = computed(() => {
-  const options = [
-    { value: '__inherit__', label: t('apps.display_profile_inherit') },
-    { value: '__physical__', label: t('apps.display_profile_physical') },
-    { value: 'ZakoHDR', label: t('apps.display_profile_virtual') },
+const displayCopy = computed(() => displayTreeTexts(locale.value))
+const displayOptionsNote = computed(() => `${t('config.display_device_options_note_windows')}\n${t('config.display_device_options_note_desc_windows')}`)
+const displayOutputCards = computed(() => {
+  const cards = [
+    { id: '__inherit__', kind: 'auto', title: t('apps.display_profile_inherit') },
+    { id: '__physical__', kind: 'physical', title: t('apps.display_profile_physical') },
+    { id: 'ZakoHDR', kind: 'virtual', title: t('apps.display_profile_virtual') },
   ]
   for (const device of displayDevices.value) {
     const data = String(device?.data || '')
     if (/FRIENDLY NAME:\s*Zako HDR/i.test(data) || device.device_id === 'ZakoHDR') continue
-    options.push({ value: device.device_id, label: friendlyDisplayName(device) })
+    const display = data.match(/DISPLAY NAME:\s*(\S+)/i)?.[1] || ''
+    cards.push({
+      id: device.device_id,
+      kind: 'physical',
+      title: friendlyDisplayName(device),
+      text: display.replace(/^\\\\\.\\/, ''),
+      primary: /DEVICE STATE:\s*PRIMARY/i.test(data),
+    })
   }
   const selected = appDisplayOutput.value
-  if (selected && !['__inherit__', '__physical__', 'ZakoHDR'].includes(selected) && !options.some((option) => option.value === selected)) {
-    options.push({ value: selected, label: selected })
+  if (selected && !cards.some((card) => card.id === selected)) {
+    cards.push({ id: selected, kind: 'physical', title: selected })
   }
-  return options
+  return cards
 })
-const topologyOptions = computed(() => [
-  { value: '', label: t('apps.display_profile_inherit') },
-  { value: 'no_operation', label: t('config.display_device_prep_no_operation_windows') },
-  { value: 'ensure_active', label: t('config.display_device_prep_ensure_active_windows') },
-  { value: 'ensure_primary', label: t('config.display_device_prep_ensure_primary_windows') },
-  { value: 'ensure_secondary', label: t('config.display_device_prep_ensure_secondary_windows') },
-  { value: 'ensure_only_display', label: t('config.display_device_prep_ensure_only_display_windows') },
-])
+const topologyOptions = computed(() => {
+  const current = formData.value?.['display-device-prep'] || ''
+  const modes = prepChoices({
+    windows: true,
+    virtual: formData.value?.['display-target'] === 'virtual',
+    current,
+  })
+  return [
+    { value: '', label: t('apps.display_profile_inherit') },
+    ...modes.map((value) => ({ value, label: displayCopy.value.prep[value] })),
+  ]
+})
+const topologyEffect = computed(() => {
+  const mode = formData.value?.['display-device-prep']
+  if (!mode) return t('apps.display_profile_inherit')
+  return displayCopy.value.prep.effect?.[mode] || $tp(`config.display_device_prep_${mode}_desc`)
+})
 const displayRuleModes = Object.freeze({
   '': 'inherit',
   no_operation: 'no_operation',
@@ -414,12 +464,12 @@ const displayRuleValue = (mode) => {
 const resolutionRuleOptions = computed(() => [
   { value: 'inherit', label: t('apps.display_profile_inherit') },
   { value: 'no_operation', label: t('apps.display_profile_no_operation') },
-  { value: 'follow_client', label: t('config.resolution_change_automatic_windows') },
+  { value: 'follow_client', label: $tp('config.resolution_change_automatic') },
 ])
 const refreshRuleOptions = computed(() => [
   { value: 'inherit', label: t('apps.display_profile_inherit') },
   { value: 'no_operation', label: t('apps.display_profile_no_operation') },
-  { value: 'follow_client', label: t('config.refresh_rate_change_automatic_windows') },
+  { value: 'follow_client', label: $tp('config.refresh_rate_change_automatic') },
 ])
 const hdrOptions = computed(() => [
   { value: '', label: t('apps.display_profile_fixed_hdr_inherit') },
@@ -441,6 +491,7 @@ const dynamicFollowOptions = computed(() => [
 const hasFixedResolution = computed(() => Boolean(formData.value?.['display-resolution']?.trim()))
 const hasFixedRefreshRate = computed(() => Boolean(formData.value?.['display-refresh-rate']?.trim()))
 const fixedValuesEnabled = ref(false)
+const advancedOpen = ref(false)
 watch(fixedValuesEnabled, (enabled) => {
   if (!enabled && formData.value) {
     formData.value['display-resolution'] = ''
@@ -565,6 +616,7 @@ const initializeForm = (app) => {
   formData.value = { ...DEFAULT_FORM_DATA, ...deepClone(app) }
   ensureDefaultValues()
   fixedValuesEnabled.value = Boolean(formData.value['display-resolution']?.trim() || formData.value['display-refresh-rate']?.trim())
+  advancedOpen.value = fixedValuesEnabled.value || Boolean(formData.value['display-hdr'])
   validation.value = {}
   imageError.value = ''
   initialSnapshot.value = JSON.stringify(formData.value)
